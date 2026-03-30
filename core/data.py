@@ -8,6 +8,7 @@ import re
 import json
 import xml.etree.ElementTree as ET
 import numpy as np
+from datetime import datetime
 
 # --- INITIALISATION FIREBASE ---
 def init_firebase():
@@ -17,6 +18,7 @@ def init_firebase():
             if "firebase" not in st.secrets:
                 return None, None
             fb_conf = st.secrets["firebase"]
+            
             # Nettoyage de la clé privée (gestion des guillemets et sauts de ligne)
             raw_key = fb_conf.get("private_key", "").strip()
             if raw_key.startswith('"') and raw_key.endswith('"'):
@@ -49,36 +51,33 @@ def init_firebase():
 def load_profile(user_id):
     """Charge le profil utilisateur depuis la collection 'profiles'."""
     db, _ = init_firebase()
-    if not db: return {
+    default_profile = {
         "intervals_id": "",
         "api_key": "",
         "betrail_index": 50.0,
         "weekly_sessions_target": 3,
         "race_plan": [],
-        "checkpoints": []
+        "checkpoints": [],
+        "betrail_paste": ""
     }
     
-    doc_ref = db.collection("profiles").document(user_id)
+    if not db: 
+        return default_profile
+    
     try:
+        doc_ref = db.collection("profiles").document(user_id)
         doc = doc_ref.get()
         if doc.exists:
             profile = doc.to_dict()
-            # Assurer la présence des listes pour éviter les erreurs de rendu
-            if "race_plan" not in profile: profile["race_plan"] = []
-            if "checkpoints" not in profile: profile["checkpoints"] = []
+            # Fusion avec les valeurs par défaut pour garantir les clés
+            for key, val in default_profile.items():
+                if key not in profile:
+                    profile[key] = val
             return profile
     except Exception as e:
         st.error(f"Erreur chargement profil : {e}")
     
-    # Valeurs par défaut si nouveau compte ou erreur
-    return {
-        "intervals_id": "",
-        "api_key": "",
-        "betrail_index": 50.0,
-        "weekly_sessions_target": 3,
-        "race_plan": [],
-        "checkpoints": []
-    }
+    return default_profile
 
 def save_user_profile(user_id, data):
     """Sauvegarde ou met à jour le profil utilisateur (merge=True)."""
@@ -90,7 +89,7 @@ def save_user_profile(user_id, data):
     except Exception as e:
         st.error(f"Erreur sauvegarde profil : {e}")
 
-# Alias pour compatibilité avec les anciens modules
+# Alias pour compatibilité
 save_profile = save_user_profile
 
 # --- RÉCUPÉRATION INTERVALS.ICU ---
@@ -100,7 +99,9 @@ def get_athlete_fitness(intervals_id, api_key):
     if not intervals_id or not api_key:
         return pd.DataFrame()
 
-    url = f"https://intervals.icu/api/v1/athlete/{intervals_id}/activities?oldest=2026-01-01"
+    # On récupère les activités depuis le début de l'année en cours
+    year = datetime.now().year
+    url = f"https://intervals.icu/api/v1/athlete/{intervals_id}/activities?oldest={year}-01-01"
     
     auth_str = f"API_KEY:{api_key}"
     encoded_auth = base64.b64encode(auth_str.encode()).decode()
@@ -112,7 +113,9 @@ def get_athlete_fitness(intervals_id, api_key):
             df = pd.DataFrame(response.json())
             if not df.empty and 'start_date_local' in df.columns:
                 df['date'] = pd.to_datetime(df['start_date_local'])
-                for col in ['icu_ctl', 'icu_atl', 'icu_tsb']:
+                # Conversion numérique des colonnes clés
+                cols = ['icu_ctl', 'icu_atl', 'icu_tsb', 'icu_training_load']
+                for col in cols:
                     if col in df.columns:
                         df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
                 return df.sort_values('date')
@@ -120,7 +123,7 @@ def get_athlete_fitness(intervals_id, api_key):
     except Exception:
         return pd.DataFrame()
 
-# --- TRAITEMENT GPX POUR PROFIL ALTIMÉTRIQUE ---
+# --- TRAITEMENT GPX ---
 def parse_gpx_file(file):
     """Extrait la distance et l'élévation d'un fichier GPX."""
     try:
@@ -132,7 +135,6 @@ def parse_gpx_file(file):
         data = []
         total_dist = 0.0
         total_gain = 0.0
-        total_loss = 0.0
         last_lat, last_lon, last_ele = None, None, None
         
         for trkpt in root.findall('.//gpx:trkpt', ns):
@@ -146,79 +148,65 @@ def parse_gpx_file(file):
                 total_dist += d
                 diff = ele - last_ele
                 if diff > 0: total_gain += diff
-                else: total_loss += abs(diff)
             
             data.append({"distance": round(total_dist, 3), "elevation": round(ele, 1)})
             last_lat, last_lon, last_ele = lat, lon, ele
         
-        if not data: return pd.DataFrame()
-        st.success(f"✅ GPX analysé : {total_dist:.2f}km | +{int(total_gain)}m")
         return pd.DataFrame(data)
     except Exception as e:
         st.error(f"Erreur GPX : {e}")
         return pd.DataFrame()
 
 def haversine(lat1, lon1, lat2, lon2):
+    """Calcul de distance entre deux points GPS en km."""
     R = 6371.0
     phi1, phi2 = np.radians(lat1), np.radians(lat2)
     dphi, dlambda = np.radians(lat2 - lat1), np.radians(lon2 - lon1)
     a = np.sin(dphi/2.0)**2 + np.cos(phi1)*np.cos(phi2)*np.sin(dlambda/2.0)**2
     return R * 2 * np.arctan2(np.sqrt(a), np.sqrt(1.0-a))
 
-# --- RÉCUPÉRATION NOLIO ---
-def get_nolio_sessions(api_token, start_date, end_date):
-    if not api_token: return []
-    url = f"https://api.nolio.io/athlete/session/?start={start_date}&end={end_date}"
-    headers = {"Authorization": f"Bearer {api_token}", "Content-Type": "application/json"}
-    try:
-        response = requests.get(url, headers=headers, timeout=10)
-        return response.json() if response.status_code == 200 else []
-    except Exception: return []
-
-# --- PARSING BETRAIL ---
+# --- PARSING BETRAIL (V2 Robuste) ---
 def parse_betrail_paste(raw_text):
-    if not raw_text or len(str(raw_text).strip()) < 10: return []
+    """
+    Analyse le copier-coller brut de la page palmarès BeTrail.
+    Format attendu : lignes répétitives incluant Date, Nom, Distance, D+, Performance.
+    """
+    if not raw_text or len(str(raw_text).strip()) < 10:
+        return []
+    
     races = []
     lines = [l.strip() for l in str(raw_text).split('\n') if l.strip()]
+    
+    # Pattern de détection : cherche une ligne avec une date (JJ/MM/AAAA)
+    date_pattern = r"(\d{2}/\d{2}/\d{4})"
+    
     i = 0
     while i < len(lines):
-        if "/" in lines[i] or "CLOCK" in lines[i]:
+        match = re.search(date_pattern, lines[i])
+        if match:
             try:
-                cursor = i + 1
-                nom = lines[cursor]
-                cursor += 1
-                if lines[cursor].lower() in ['ultra', 'long', 'short', 'medium']: cursor += 1
-                date_course = lines[cursor]
-                cursor += 1
-                distance, dplus = lines[cursor], lines[cursor+1]
-                cursor += 4
-                perf = lines[cursor]
-                races.append({"Date": date_course, "Course": nom, "Détails": f"{distance} / {dplus}", "Perf": perf.replace(',', '.')})
-                i = cursor + 1
-            except: i += 1
-        else: i += 1
+                # Structure type BeTrail : souvent le nom est au dessus ou en dessous
+                # On essaie de capturer un bloc cohérent
+                date_course = match.group(1)
+                nom_course = lines[i-1] if i > 0 else "Course Inconnue"
+                
+                # Recherche de la performance (un nombre souvent entre 40 et 100)
+                perf = "0.0"
+                for j in range(i, min(i+10, len(lines))):
+                    if "%" in lines[j] or (lines[j].replace(',', '.').replace('.', '').isdigit() and 30 < float(lines[j].replace(',', '.')) < 100):
+                        perf = lines[j].replace(',', '.')
+                        break
+                
+                races.append({
+                    "date": date_course,
+                    "nom": nom_course,
+                    "performance": perf,
+                    "resultat": "Finisher" # Label par défaut
+                })
+                i += 5 # Sauter vers le bloc suivant
+            except:
+                i += 1
+        else:
+            i += 1
+            
     return races
-
-# --- FONCTIONS DE COACHING COMPLÉMENTAIRES ---
-def get_ia_coaching_feedback(df):
-    """Génère un conseil basé sur les données Intervals.icu (Utilisé par dashboard.py)."""
-    if df is None or df.empty:
-        return "Connectez votre compte Intervals.icu dans l'onglet Profil pour recevoir votre analyse personnalisée."
-    
-    last_ctl = df['icu_ctl'].iloc[-1] if 'icu_ctl' in df.columns else 0
-    last_tsb = df['icu_tsb'].iloc[-1] if 'icu_tsb' in df.columns else 0
-    
-    if last_tsb < -20:
-        status = "Attention à la fatigue (TSB très bas)."
-    elif last_tsb > 5:
-        status = "Phase de fraîcheur, prêt pour un bloc intense ou une course."
-    else:
-        status = "Charge d'entraînement équilibrée."
-        
-    return f"Analyse Flash : Votre Fitness (CTL) est de {last_ctl:.0f}. {status}"
-
-def get_coaching_strategy(df):
-    """Définit la stratégie actuelle (Utilisé par dashboard.py)."""
-    if df is None or df.empty:
-        return "En attente de données..."
-    return "Optimisation de l'endurance aérobie."
