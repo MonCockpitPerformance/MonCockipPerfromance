@@ -3,8 +3,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import pandas as pd
 from datetime import date, datetime
-from core.logic import get_ia_coaching_feedback, get_coaching_strategy
-from core.data import load_profile
+from core.data import load_profile, get_ia_coaching_feedback, get_coaching_strategy
 
 # Essayer d'importer le rendu stylisé des jauges (si défini dans ui.py)
 try:
