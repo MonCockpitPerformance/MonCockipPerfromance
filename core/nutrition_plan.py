@@ -26,7 +26,7 @@ def load_products_from_excel():
                     "type": str(first_row['Type de produit']).lower(),
                     "portion_g": float(first_row['Portion en g']) if 'Portion en g' in first_row else 1.0
                 }
-                # Extraction des différents apports (l'Excel a souvent une ligne par type d'apport)
+                # Extraction des différents apports
                 for _, row in group.iterrows():
                     apport = str(row['Type apport']).lower()
                     val = row['Apport produit']
@@ -94,6 +94,7 @@ def render():
         return
 
     profile = load_profile(user_id)
+    # On supporte l'ancienne et la nouvelle structure de stockage des plans
     race_plans = profile.get("race_plans", {})
     
     if not race_plans:
@@ -106,7 +107,7 @@ def render():
     
     # 3. EXTRACTION DES RAVITOS
     checkpoints = sorted(race_data.get("checkpoints", []), key=lambda x: x['distance'])
-    ravitos = [cp for cp in checkpoints if "Ravito" in cp['type']]
+    ravitos = [cp for cp in checkpoints if "Ravito" in cp.get('type', '')]
     
     if not ravitos:
         st.warning("Aucun point de type 'Ravito' n'a été défini dans votre Plan de Course.")
@@ -115,7 +116,7 @@ def render():
     # 4. CHARGEMENT BASE PRODUITS
     product_db = load_products_from_excel()
     if not product_db:
-        st.warning("Le référentiel 'Data/produits.xlsx' est manquant ou vide.")
+        st.info("Le référentiel 'Data/produits.xlsx' est manquant. Seuls les calculs théoriques seront disponibles.")
 
     # Initialisation de la structure nutrition si inexistante
     if "nutrition" not in race_data:
@@ -164,7 +165,6 @@ def render():
             if it['nom'] in product_db:
                 p_type = product_db[it['nom']]['type']
                 if "boisson" in p_type or "poudre" in p_type:
-                    # On considère que la portion préparée correspond au volume d'eau
                     water_from_products += (it['qty'] * product_db[it['nom']]['portion_g'] / 1000.0)
         
         total_water = water_from_flasques + water_from_products
@@ -177,21 +177,20 @@ def render():
         exp_label = f"📍 {ravito['name']} (KM {ravito['distance']}) — Temps estimé : {format_duration(dur_h*60)}"
         with st.expander(exp_label, expanded=True):
             
-            # Header Ravito
             c_info, c_temp = st.columns([3, 1])
             with c_temp:
-                new_temp = st.select_slider("🌡️ Température prévisionnelle", [10, 15, 20, 25, 30, 35, 40], conf.get("temp", 20), key=f"t_{cp_id}")
+                new_temp = st.select_slider("🌡️ Température", [10, 15, 20, 25, 30, 35, 40], conf.get("temp", 20), key=f"t_{cp_id}")
                 if new_temp != conf.get("temp"):
                     conf["temp"] = new_temp
                     save_profile(user_id, {"race_plans": race_plans})
                     st.rerun()
             
             with c_info:
-                st.caption(f"Ajustement besoins : x{heat_coeff:.2f} | Distance segment : {dist_seg:.1f} km")
+                st.caption(f"Ajustement besoins : x{heat_coeff:.2f} | Segment : {dist_seg:.1f} km")
 
             changed = False
             
-            # Ligne EAU
+            # Lignes d'apports
             w_h, nb_f = render_compact_row(
                 "💧 Eau (Litre)", total_water, conf.get("t_water_h", 0.6), dur_h, "L", f"w_{cp_id}", 
                 coeff=heat_coeff, min_v=0.1, max_v=2.0, step=0.1, is_water=True, flasques=conf.get("flasques", 2)
@@ -203,7 +202,6 @@ def render():
 
             st.markdown("---")
             
-            # Autres métriques
             s_h, _ = render_compact_row("🧂 Sel (Gramme)", total_salt, conf.get("t_salt_h", 0.5), dur_h, "g", f"s_{cp_id}", coeff=heat_coeff, min_v=0, max_v=3, step=0.1)
             if s_h != conf.get("t_salt_h"):
                 conf["t_salt_h"] = s_h
@@ -244,7 +242,6 @@ def render():
                         save_profile(user_id, {"race_plans": race_plans})
                         st.rerun()
 
-            # Liste des produits déjà ajoutés
             if items:
                 for idx, it in enumerate(items):
                     cx, cy = st.columns([5, 1])
