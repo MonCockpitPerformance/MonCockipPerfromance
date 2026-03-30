@@ -1,4 +1,5 @@
 import streamlit as st
+import pd as pd
 import pandas as pd
 import plotly.graph_objects as go
 from datetime import datetime, timedelta, date
@@ -72,7 +73,7 @@ def estimate_recommended_pace(profile):
     """
     Estime une allure recommandée (min/km) selon l'index BeTrail ou profil.
     """
-    # Valeur par défaut prudente pour un traileur moyen
+    # Valeur par défaut prudente
     base_pace = 9.0 
     
     # Tentative d'ajustement selon l'index BeTrail si présent
@@ -293,6 +294,13 @@ def render():
                 })
                 save_profile(user_id, {"race_plans": race_plans})
                 st.rerun()
+            
+            # Option de suppression du dernier point
+            if race_data["checkpoints"]:
+                if st.button("🗑️ Supprimer le dernier point"):
+                    race_data["checkpoints"].pop()
+                    save_profile(user_id, {"race_plans": race_plans})
+                    st.rerun()
         else:
             st.info("Importez un GPX pour ajouter des points.")
 
