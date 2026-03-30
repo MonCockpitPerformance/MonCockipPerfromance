@@ -14,6 +14,8 @@ def init_firebase():
     """Initialise Firebase Admin SDK avec les secrets Streamlit."""
     if not firebase_admin._apps:
         try:
+            if "firebase" not in st.secrets:
+                return None, None
             fb_conf = st.secrets["firebase"]
             # Nettoyage de la clé privée (gestion des guillemets et sauts de ligne)
             raw_key = fb_conf.get("private_key", "").strip()
@@ -38,13 +40,23 @@ def init_firebase():
         except Exception as e:
             st.error(f"Erreur d'initialisation Firebase : {e}")
             return None, None
-    return firestore.client(), auth
+    try:
+        return firestore.client(), auth
+    except:
+        return None, None
 
 # --- GESTION DU PROFIL ---
 def load_profile(user_id):
     """Charge le profil utilisateur depuis la collection 'profiles'."""
     db, _ = init_firebase()
-    if not db: return {}
+    if not db: return {
+        "intervals_id": "",
+        "api_key": "",
+        "betrail_index": 50.0,
+        "weekly_sessions_target": 3,
+        "race_plan": [],
+        "checkpoints": []
+    }
     
     doc_ref = db.collection("profiles").document(user_id)
     try:
@@ -156,7 +168,7 @@ def haversine(lat1, lon1, lat2, lon2):
 # --- RÉCUPÉRATION NOLIO ---
 def get_nolio_sessions(api_token, start_date, end_date):
     if not api_token: return []
-    url = f"https://api.nolio.io/athelte/session/?start={start_date}&end={end_date}"
+    url = f"https://api.nolio.io/athlete/session/?start={start_date}&end={end_date}"
     headers = {"Authorization": f"Bearer {api_token}", "Content-Type": "application/json"}
     try:
         response = requests.get(url, headers=headers, timeout=10)
@@ -187,10 +199,10 @@ def parse_betrail_paste(raw_text):
         else: i += 1
     return races
 
-# --- NOUVELLES FONCTIONS DE COACHING (POUR RÉPARER LE BUG) ---
+# --- FONCTIONS DE COACHING COMPLÉMENTAIRES ---
 def get_ia_coaching_feedback(df):
     """Génère un conseil basé sur les données Intervals.icu (Utilisé par dashboard.py)."""
-    if df.empty:
+    if df is None or df.empty:
         return "Connectez votre compte Intervals.icu dans l'onglet Profil pour recevoir votre analyse personnalisée."
     
     last_ctl = df['icu_ctl'].iloc[-1] if 'icu_ctl' in df.columns else 0
@@ -207,6 +219,6 @@ def get_ia_coaching_feedback(df):
 
 def get_coaching_strategy(df):
     """Définit la stratégie actuelle (Utilisé par dashboard.py)."""
-    if df.empty:
+    if df is None or df.empty:
         return "En attente de données..."
     return "Optimisation de l'endurance aérobie."
