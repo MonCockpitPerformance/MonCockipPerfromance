@@ -1,7 +1,4 @@
 streamlit
 pandas
 plotly
-firebase-admin
-requests
 openpyxl
-python-dotenv
