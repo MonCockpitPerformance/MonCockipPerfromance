@@ -2,172 +2,194 @@ import streamlit as st
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import pandas as pd
-from datetime import date, datetime
-from core.data import load_profile, get_ia_coaching_feedback, get_coaching_strategy
+import numpy as np
+from datetime import datetime, timedelta
 
-# Essayer d'importer le rendu stylisé des jauges (si défini dans ui.py)
+# On importe tout depuis core.data (logique centralisée)
+from core.data import (
+    load_profile, 
+    get_ia_coaching_feedback, 
+    get_coaching_strategy,
+    parse_betrail_paste
+)
+
+# Import du rendu UI
 try:
     from core.ui import render_sport_metric
 except ImportError:
     render_sport_metric = None
 
 def render(df):
-    # --- CHARGEMENT DU CONTEXTE ---
-    # Récupération de l'UID utilisateur (compatible avec différents systèmes de session)
+    # --- 1. CONTEXTE ET AUTHENTIFICATION ---
     user_id = st.session_state.get('uid') or (st.session_state.get('user', {}).get('uid') if st.session_state.get('user') else None)
     
     if not user_id:
-        st.warning("Veuillez vous connecter pour voir le dashboard.")
+        st.warning("⚠️ Session interrompue. Veuillez vous reconnecter.")
         return
         
     prof = load_profile(user_id)
-    
     st.title("🚀 Cockpit Performance")
 
-    # --- SÉCURITÉ : VÉRIFICATION DES DONNÉES ---
+    # --- 2. TRAITEMENT DES DONNÉES INTERVALS.ICU ---
     if df is None or df.empty:
-        st.warning("Données Intervals.icu non disponibles. Connectez votre compte dans l'onglet Profil.")
+        st.info("📊 En attente de synchronisation Intervals.icu...")
+        st.caption("Vérifiez vos identifiants dans l'onglet Profil.")
         return
 
-    # Nettoyage et préparation des données
+    # Nettoyage et préparation temporelle
     df_clean = df.copy()
     if 'date' not in df_clean.columns and 'start_date_local' in df_clean.columns:
         df_clean['date'] = pd.to_datetime(df_clean['start_date_local'])
     
     df_clean = df_clean.fillna(0).sort_values('date')
-    last_row = df_clean.iloc[-1]
     
+    # Extraction des métriques clés (dernière valeur connue)
+    last_row = df_clean.iloc[-1]
     ctl = int(last_row.get('icu_ctl', 0))
     atl = int(last_row.get('icu_atl', 0))
-    tsb = ctl - atl
-
-    # --- 1. STRATÉGIE ET MÉTRIQUES (KPI) ---
-    st.subheader("💡 Coaching Stratégique")
+    tsb = int(ctl - atl)
     
-    # Correction : On passe le DF aux fonctions comme défini dans data.py
-    strat_label = get_coaching_strategy(df_clean)
-    st.success(f"🎯 Stratégie actuelle : {strat_label}")
+    # Calcul des tendances (7 derniers jours vs 7 précédents)
+    recent_tss = df_clean['icu_training_load'].tail(7).sum()
+    prev_tss = df_clean['icu_training_load'].iloc[-14:-7].sum()
+    delta_tss = int(recent_tss - prev_tss)
 
-    c1, c2, c3 = st.columns(3)
-    if render_sport_metric:
-        with c1: render_sport_metric(ctl, "Condition (CTL)", "#3b82f6", 0, 100)
-        with c2: render_sport_metric(atl, "Fatigue (ATL)", "#a855f7", 0, 150)
-        with c3: 
-            # Couleur dynamique pour le TSB selon les zones Intervals
-            if tsb < -30: color = "#ef4444" # Risque
-            elif tsb < -10: color = "#10b981" # Optimal
-            elif tsb < 5: color = "#3b82f6" # Frais
-            else: color = "#f59e0b" # Transition
-            render_sport_metric(tsb, "Forme (TSB)", color, -40, 40)
-    else:
-        c1.metric("Condition (CTL)", ctl, help="Charge d'entraînement long terme")
-        c2.metric("Fatigue (ATL)", atl, help="Charge d'entraînement court terme")
-        c3.metric("Forme (TSB)", tsb, delta=tsb, delta_color="normal", help="Équilibre fraîcheur/fatigue")
+    # --- 3. SECTION COACHING & STRATÉGIE ---
+    with st.container():
+        strat_label = get_coaching_strategy(df_clean)
+        
+        # Style dynamique selon la stratégie
+        strat_color = "#10b981" if "Optimal" in strat_label else ("#f59e0b" if "Surcharge" in strat_label else "#3b82f6")
+        
+        st.markdown(f"""
+        <div style="background: {strat_color}22; padding: 15px; border-radius: 10px; border-left: 5px solid {strat_color}; margin-bottom: 20px;">
+            <h4 style="margin:0; color:{strat_color};">🎯 Focus actuel : {strat_label}</h4>
+        </div>
+        """, unsafe_allow_value=True)
 
-    # --- 2. GRAPHIQUE DOUBLE ETAGE (STYLE INTERVALS/GARMIN) ---
-    st.markdown("### 📈 Analyse de la Condition Physique")
+    # Affichage des KPIs
+    col1, col2, col3, col4 = st.columns(4)
     
+    with col1:
+        if render_sport_metric: render_sport_metric(ctl, "Condition (CTL)", "#3b82f6", 0, 150)
+        else: st.metric("CTL", ctl)
+        
+    with col2:
+        if render_sport_metric: render_sport_metric(atl, "Fatigue (ATL)", "#a855f7", 0, 180)
+        else: st.metric("ATL", atl)
+        
+    with col3:
+        tsb_color = "#10b981" if -30 <= tsb <= -10 else ("#ef4444" if tsb < -30 else "#3b82f6")
+        if render_sport_metric: render_sport_metric(tsb, "Forme (TSB)", tsb_color, -50, 50)
+        else: st.metric("TSB", tsb)
+
+    with col4:
+        st.metric("Charge 7j", f"{int(recent_tss)}", f"{delta_tss:+d} TSS", delta_color="normal")
+        st.caption("Tendance vs S-1")
+
+    # --- 4. GRAPHIQUE DE PERFORMANCE (PMC) AVANCÉ ---
+    st.markdown("### 📈 Analyse de Charge & Volume")
+    
+    # Création du graphique avec deux axes Y
     fig = make_subplots(
         rows=2, cols=1, 
         shared_xaxes=True, 
         vertical_spacing=0.05,
-        row_heights=[0.65, 0.35]
+        row_heights=[0.7, 0.3],
+        specs=[[{"secondary_y": True}], [{"secondary_y": False}]]
     )
 
-    # --- ETAGE 1 : CONDITION & FATIGUE (CTL/ATL) ---
+    # Zone de forme optimale (TSB entre -10 et -30)
+    fig.add_hrect(y0=-30, y1=-10, fillcolor="#10b981", opacity=0.1, line_width=0, row=1, col=1)
+
+    # ATL (Fatigue) - Surface
     fig.add_trace(go.Scatter(
         x=df_clean['date'], y=df_clean['icu_atl'],
         name="Fatigue (ATL)",
-        line=dict(color='#a855f7', width=1.5),
-        opacity=0.5,
+        line=dict(color='#a855f7', width=1),
         fill='tozeroy', fillcolor='rgba(168, 85, 247, 0.05)'
     ), row=1, col=1)
 
+    # CTL (Condition) - Ligne épaisse
     fig.add_trace(go.Scatter(
         x=df_clean['date'], y=df_clean['icu_ctl'],
         name="Condition (CTL)",
         line=dict(color='#3b82f6', width=3),
     ), row=1, col=1)
 
-    # --- ETAGE 2 : FORME (TSB) AVEC ZONES ---
-    df_clean['tsb_curve'] = df_clean['icu_ctl'] - df_clean['icu_atl']
-    
-    # Zones de fond pour le TSB (Intervals standard)
-    fig.add_hrect(y0=-100, y1=-30, fillcolor="rgba(239, 68, 68, 0.15)", line_width=0, row=2, col=1)
-    fig.add_hrect(y0=-30, y1=-10, fillcolor="rgba(16, 185, 129, 0.2)", line_width=0, row=2, col=1)
-    fig.add_hrect(y0=-10, y1=5, fillcolor="rgba(156, 163, 175, 0.1)", line_width=0, row=2, col=1)
-    fig.add_hrect(y0=5, y1=100, fillcolor="rgba(59, 130, 246, 0.15)", line_width=0, row=2, col=1)
+    # TSS Journalier - Barres (Axe secondaire)
+    fig.add_trace(go.Bar(
+        x=df_clean['date'], y=df_clean['icu_training_load'],
+        name="Charge (TSS)",
+        marker_color='rgba(255, 255, 255, 0.2)',
+        marker_line_width=0
+    ), row=1, col=1, secondary_y=True)
 
+    # TSB (Forme) - Courbe en bas
     fig.add_trace(go.Scatter(
-        x=df_clean['date'], y=df_clean['tsb_curve'],
+        x=df_clean['date'], y=df_clean['icu_ctl'] - df_clean['icu_atl'],
         name="Forme (TSB)",
         line=dict(color='#ffffff', width=2),
-        fill='tozeroy', fillcolor='rgba(255,255,255,0.05)'
+        fill='tozeroy', fillcolor='rgba(255, 255, 255, 0.05)'
     ), row=2, col=1)
 
-    # --- MARQUEURS OBJECTIFS ---
-    race_date_raw = prof.get('next_race_date') or prof.get('date_objectif')
-    race_name = prof.get('next_race_name') or prof.get('nom_objectif') or "Course"
-
-    if race_date_raw:
+    # Marqueur de l'objectif (si présent dans le profil)
+    obj_date = prof.get('next_race_date') or prof.get('date_objectif')
+    if obj_date:
         try:
-            target_date = pd.to_datetime(str(race_date_raw))
-            fig.add_vline(
-                x=target_date, 
-                line_width=2, line_dash="dash", line_color="#ef4444",
-                annotation_text=f"🚩 {race_name}",
-                annotation_position="top right"
-            )
-        except:
-            pass
+            target_dt = pd.to_datetime(str(obj_date))
+            fig.add_vline(x=target_dt, line_dash="dash", line_color="#ef4444", 
+                          annotation_text="OBJECTIF", annotation_position="top left")
+        except: pass
 
-    # --- DESIGN FINAL ---
+    # Mise en page
     fig.update_layout(
         template="plotly_dark",
         height=600,
-        margin=dict(l=10, r=10, t=30, b=10),
-        hovermode="x unified",
-        showlegend=True,
+        margin=dict(l=0, r=0, t=20, b=0),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        hovermode="x unified",
         paper_bgcolor='rgba(0,0,0,0)',
         plot_bgcolor='rgba(0,0,0,0)'
     )
     
-    fig.update_yaxes(title_text="CTL / ATL", row=1, col=1)
-    fig.update_yaxes(title_text="TSB", row=2, col=1, range=[-50, 30])
-    fig.update_xaxes(showgrid=False)
-
+    fig.update_yaxes(title_text="Fitness / Fatigue", row=1, col=1)
+    fig.update_yaxes(title_text="Forme", row=2, col=1)
+    
     st.plotly_chart(fig, use_container_width=True)
 
-    # --- 3. SYNTHÈSE BETRAIL ---
+    # --- 5. ANALYSE IA & PALMARÈS ---
     st.markdown("---")
-    st.subheader("🏆 Expérience & Palmarès (BeTrail)")
+    col_ai, col_bt = st.columns([1.2, 0.8])
 
-    # Correction : Utilisation du nom de champ correct
-    raw_data = prof.get('betrail_raw_data') or prof.get('betrail_paste')
-    if raw_data:
-        from core.data import parse_betrail_paste
-        courses = parse_betrail_paste(raw_data)
+    with col_ai:
+        st.subheader("🤖 Coach IA Ultra")
+        feedback = get_ia_coaching_feedback(df_clean)
         
-        if courses:
-            race_df = pd.DataFrame(courses)
-            st.dataframe(
-                race_df, 
-                use_container_width=True, hide_index=True,
-                column_config={
-                    "Perf": st.column_config.ProgressColumn("Efficacité", min_value=0, max_value=100, format="%d%%")
-                }
-            )
-        else:
-            st.warning("⚠️ Impossible d'analyser le texte BeTrail. Vérifiez le format du copier-coller.")
-    else:
-        st.info("💡 Pour voir ton palmarès, copie-colle tes courses depuis BeTrail dans l'onglet Profil.")
+        # Boîte de dialogue IA stylisée
+        st.markdown(f"""
+        <div style="background: #1e293b; padding: 20px; border-radius: 15px; border: 1px solid #334155;">
+            <p style="color: #cbd5e1; font-size: 0.95rem; line-height: 1.6;">
+                {feedback}
+            </p>
+        </div>
+        """, unsafe_allow_value=True)
 
-    # --- 4. DIAGNOSTIC IA ---
-    st.markdown("---")
-    # Correction : On passe le DF complet
-    feedback = get_ia_coaching_feedback(df_clean)
-    st.info(f"✨ **Analyse de l'IA :** {feedback}")
+    with col_bt:
+        st.subheader("🏆 BeTrail")
+        raw_bt = prof.get('betrail_raw_data') or prof.get('betrail_paste')
+        if raw_bt:
+            races = parse_betrail_paste(raw_bt)
+            if races:
+                # On transforme en DataFrame pour un joli rendu
+                rdf = pd.DataFrame(races)
+                for i, row in rdf.iterrows():
+                    st.markdown(f"**{row['date']}** - {row['nom']}")
+                    st.caption(f"🏁 {row['resultat']} | 📈 Perf: {row['performance']}")
+            else:
+                st.info("Format BeTrail non reconnu.")
+        else:
+            st.info("Collez vos données BeTrail dans le Profil.")
 
 if __name__ == "__main__":
     pass
