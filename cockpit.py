@@ -11,9 +11,10 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 if current_dir not in sys.path:
     sys.path.insert(0, current_dir)
 
-# Importations des modules internes
+# --- MODIFICATION DES IMPORTS DANS COCKPIT.PY ---
 try:
-    from core.data import init_firebase, load_profile, get_athlete_fitness, save_user_profile
+    # On remplace 'core.data' par 'core.logic'
+    from core.logic import init_firebase, load_profile, get_athlete_fitness, save_user_profile
     import core.race_plan as race_plan
     import core.nutrition_plan as nutrition_plan
     import tabs.dashboard as dashboard
@@ -23,7 +24,7 @@ try:
     from firebase_admin import auth as admin_auth
 except ImportError as e:
     st.error(f"❌ Erreur d'importation des modules critiques : {e}")
-    st.info("Vérifiez que la structure des dossiers (core/, tabs/) est correcte.")
+    st.info("Assurez-vous que le fichier s'appelle bien 'logic.py' dans le dossier 'core'.")
     st.stop()
 
 # --- 1. CONFIGURATION DE LA PAGE ---
