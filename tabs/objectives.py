@@ -1,13 +1,23 @@
 import streamlit as st
 import pandas as pd
-from core.data import init_firebase
 from datetime import datetime
+import os
+import sys
+
+# --- CONFIGURATION DES CHEMINS ---
+current_dir = os.path.dirname(os.path.abspath(__file__))
+root_dir = os.path.dirname(current_dir)
+if root_dir not in sys.path:
+    sys.path.insert(0, root_dir)
+
+from core.data import init_firebase
 
 def load_objectives(user_id):
     """Charge la liste des objectifs depuis Firestore."""
     db, _ = init_firebase()
-    # Utilisation du chemin conforme aux règles de sécurité
     app_id = st.session_state.get('app_id', 'default-app-id')
+    
+    # Chemin conforme aux règles de sécurité
     doc_ref = db.collection("artifacts").document(app_id).collection("users").document(user_id).collection("objectives")
     
     try:
@@ -37,6 +47,9 @@ def delete_objective(user_id, obj_id):
 
 def render(user_id):
     st.header("🏆 Mes Objectifs & Courses")
+    
+    if not user_id or user_id == "athlete_default":
+        st.warning("⚠️ Connectez-vous ou configurez votre profil pour sauvegarder vos objectifs.")
 
     # --- FORMULAIRE D'AJOUT ---
     with st.expander("➕ Ajouter un nouvel objectif", expanded=False):
@@ -57,7 +70,7 @@ def render(user_id):
                     help="A: Objectif principal de l'année. C: Course d'entraînement."
                 )
 
-            submitted = st.form_submit_button("Ajouter l'objectif")
+            submitted = st.form_submit_button("Ajouter l'objectif", use_container_width=True)
             if submitted and name:
                 new_obj = {
                     "name": name,
@@ -90,23 +103,23 @@ def render(user_id):
                     date_display = d_obj.strftime('%d/%m/%Y')
                     
                     # Couleur selon urgence/proximité
-                    status_color = "red" if days_left < 7 else "orange" if days_left < 30 else "white"
+                    status_color = "#ef4444" if days_left < 7 else ("#f59e0b" if days_left < 30 else "#ffffff")
                 except:
                     date_display = "Date invalide"
                     days_left = "?"
-                    status_color = "white"
+                    status_color = "#ffffff"
                 
                 c1.markdown(f"**{o.get('name', 'Sans nom')}**")
                 c1.caption(f"🏷️ {o.get('type', 'Course')}")
                 
                 c2.write(f"📅 {date_display}")
-                c2.markdown(f"p. <span style='color:{status_color}'>{days_left}j restants</span>", unsafe_allow_html=True)
+                c2.markdown(f"<span style='color:{status_color}; font-weight:bold;'>{days_left}j restants</span>", unsafe_allow_html=True)
                 
                 c3.write(f"📏 {o.get('km', 0)}km | 📈 {o.get('dplus', 0)}m")
                 priority_labels = {1: "Majeur (A)", 2: "Interm. (B)", 3: "Prépa (C)"}
                 c3.caption(f"🚩 Priorité: {priority_labels.get(o.get('priority', 3))}")
                 
-                if c4.button("🗑️", key=f"del_{o['id']}"):
+                if c4.button("🗑️", key=f"del_{o['id']}", help="Supprimer cet objectif"):
                     delete_objective(user_id, o['id'])
                     st.toast(f"Objectif {o.get('name')} supprimé.")
                     st.rerun()
@@ -120,7 +133,8 @@ def render(user_id):
             st.write(f"Tu as **{len(objs)}** objectifs prévus cette saison.")
             st.write(f"Volume total en compétition : **{total_km} km** et **{total_dplus} m D+**.")
 
-    st.caption("💡 **Note** : Ces objectifs sont transmis au coach IA pour qu'il puisse anticiper tes phases d'affûtage (Tapering) et tes blocs de charge.")
+    st.info("💡 **Note** : Ces objectifs sont transmis au coach IA pour qu'il puisse anticiper tes phases d'affûtage (Tapering) et tes blocs de charge dans l'onglet Entraînement.")
 
 if __name__ == "__main__":
-    pass
+    # Pour test local
+    render("athlete_default")
