@@ -10,6 +10,18 @@ import xml.etree.ElementTree as ET
 import numpy as np
 from datetime import datetime
 
+# --- UTILITAIRES DE SÉCURITÉ ---
+def ensure_dataframe(df_input):
+    """Garantit qu'on manipule toujours un DataFrame Pandas valide."""
+    if df_input is None:
+        return pd.DataFrame()
+    if isinstance(df_input, pd.DataFrame):
+        return df_input
+    try:
+        return pd.DataFrame(df_input)
+    except:
+        return pd.DataFrame()
+
 # --- INITIALISATION FIREBASE ---
 def init_firebase():
     """Initialise Firebase Admin SDK avec les secrets Streamlit."""
@@ -17,9 +29,10 @@ def init_firebase():
         try:
             if "firebase" not in st.secrets:
                 return None, None
+            
             fb_conf = st.secrets["firebase"]
             
-            # Nettoyage de la clé privée (gestion des guillemets et sauts de ligne)
+            # Nettoyage de la clé privée
             raw_key = fb_conf.get("private_key", "").strip()
             if raw_key.startswith('"') and raw_key.endswith('"'):
                 raw_key = raw_key[1:-1]
@@ -58,7 +71,8 @@ def load_profile(user_id):
         "weekly_sessions_target": 3,
         "race_plan": [],
         "checkpoints": [],
-        "betrail_paste": ""
+        "betrail_paste": "",
+        "weight": 70.0
     }
     
     if not db: 
@@ -69,37 +83,35 @@ def load_profile(user_id):
         doc = doc_ref.get()
         if doc.exists:
             profile = doc.to_dict()
-            # Fusion avec les valeurs par défaut pour garantir les clés
+            # Fusion avec les valeurs par défaut
             for key, val in default_profile.items():
                 if key not in profile:
                     profile[key] = val
             return profile
     except Exception as e:
-        st.error(f"Erreur chargement profil : {e}")
+        st.warning(f"Note: Chargement du profil par défaut (Erreur: {e})")
     
     return default_profile
 
 def save_user_profile(user_id, data):
-    """Sauvegarde ou met à jour le profil utilisateur (merge=True)."""
+    """Sauvegarde ou met à jour le profil utilisateur."""
     db, _ = init_firebase()
     if not db: return
-    doc_ref = db.collection("profiles").document(user_id)
     try:
+        doc_ref = db.collection("profiles").document(user_id)
         doc_ref.set(data, merge=True)
     except Exception as e:
         st.error(f"Erreur sauvegarde profil : {e}")
 
-# Alias pour compatibilité
 save_profile = save_user_profile
 
 # --- RÉCUPÉRATION INTERVALS.ICU ---
 @st.cache_data(ttl=600)
 def get_athlete_fitness(intervals_id, api_key):
-    """Récupère les données Fitness (CTL/ATL/TSB) depuis Intervals.icu."""
+    """Récupère les données Fitness depuis Intervals.icu."""
     if not intervals_id or not api_key:
         return pd.DataFrame()
 
-    # On récupère les activités depuis le début de l'année en cours
     year = datetime.now().year
     url = f"https://intervals.icu/api/v1/athlete/{intervals_id}/activities?oldest={year}-01-01"
     
@@ -108,22 +120,41 @@ def get_athlete_fitness(intervals_id, api_key):
     headers = {"Authorization": f"Basic {encoded_auth}"}
 
     try:
-        response = requests.get(url, headers=headers, timeout=10)
+        response = requests.get(url, headers=headers, timeout=15)
         if response.status_code == 200:
-            df = pd.DataFrame(response.json())
-            if not df.empty and 'start_date_local' in df.columns:
-                df['date'] = pd.to_datetime(df['start_date_local'])
-                # Conversion numérique des colonnes clés
-                cols = ['icu_ctl', 'icu_atl', 'icu_tsb', 'icu_training_load']
-                for col in cols:
-                    if col in df.columns:
-                        df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+            data = response.json()
+            df = pd.DataFrame(data)
+            
+            if not df.empty:
+                # Normalisation des dates
+                if 'start_date_local' in df.columns:
+                    df['date'] = pd.to_datetime(df['start_date_local'])
+                elif 'start_date' in df.columns:
+                    df['date'] = pd.to_datetime(df['start_date'])
+                
+                # Conversion numérique forcée des métriques ICU
+                metrics = ['icu_ctl', 'icu_atl', 'icu_tsb', 'icu_training_load']
+                for m in metrics:
+                    if m in df.columns:
+                        df[m] = pd.to_numeric(df[m], errors='coerce').fillna(0.0)
+                    else:
+                        df[m] = 0.0
+                
                 return df.sort_values('date')
-        return pd.DataFrame()
-    except Exception:
-        return pd.DataFrame()
+    except Exception as e:
+        st.error(f"Erreur Intervals.icu : {e}")
+    
+    return pd.DataFrame()
 
 # --- TRAITEMENT GPX ---
+def haversine(lat1, lon1, lat2, lon2):
+    """Calcul de distance entre deux points GPS en km."""
+    R = 6371.0
+    phi1, phi2 = np.radians(lat1), np.radians(lat2)
+    dphi, dlambda = np.radians(lat2 - lat1), np.radians(lon2 - lon1)
+    a = np.sin(dphi/2.0)**2 + np.cos(phi1)*np.cos(phi2)*np.sin(dlambda/2.0)**2
+    return R * 2 * np.arctan2(np.sqrt(a), np.sqrt(1.0-a))
+
 def parse_gpx_file(file):
     """Extrait la distance et l'élévation d'un fichier GPX."""
     try:
@@ -141,7 +172,7 @@ def parse_gpx_file(file):
             lat = float(trkpt.get('lat'))
             lon = float(trkpt.get('lon'))
             ele_tag = trkpt.find('gpx:ele', ns)
-            ele = float(ele_tag.text) if ele_tag is not None else 0
+            ele = float(ele_tag.text) if ele_tag is not None else 0.0
             
             if last_lat is not None:
                 d = haversine(last_lat, last_lon, lat, lon)
@@ -157,27 +188,14 @@ def parse_gpx_file(file):
         st.error(f"Erreur GPX : {e}")
         return pd.DataFrame()
 
-def haversine(lat1, lon1, lat2, lon2):
-    """Calcul de distance entre deux points GPS en km."""
-    R = 6371.0
-    phi1, phi2 = np.radians(lat1), np.radians(lat2)
-    dphi, dlambda = np.radians(lat2 - lat1), np.radians(lon2 - lon1)
-    a = np.sin(dphi/2.0)**2 + np.cos(phi1)*np.cos(phi2)*np.sin(dlambda/2.0)**2
-    return R * 2 * np.arctan2(np.sqrt(a), np.sqrt(1.0-a))
-
-# --- PARSING BETRAIL (V2 Robuste) ---
+# --- PARSING BETRAIL ---
 def parse_betrail_paste(raw_text):
-    """
-    Analyse le copier-coller brut de la page palmarès BeTrail.
-    Format attendu : lignes répétitives incluant Date, Nom, Distance, D+, Performance.
-    """
+    """Analyse le copier-coller brut de BeTrail."""
     if not raw_text or len(str(raw_text).strip()) < 10:
         return []
     
     races = []
     lines = [l.strip() for l in str(raw_text).split('\n') if l.strip()]
-    
-    # Pattern de détection : cherche une ligne avec une date (JJ/MM/AAAA)
     date_pattern = r"(\d{2}/\d{2}/\d{4})"
     
     i = 0
@@ -185,25 +203,28 @@ def parse_betrail_paste(raw_text):
         match = re.search(date_pattern, lines[i])
         if match:
             try:
-                # Structure type BeTrail : souvent le nom est au dessus ou en dessous
-                # On essaie de capturer un bloc cohérent
                 date_course = match.group(1)
-                nom_course = lines[i-1] if i > 0 else "Course Inconnue"
+                nom_course = lines[i-1] if i > 0 else "Course"
                 
-                # Recherche de la performance (un nombre souvent entre 40 et 100)
-                perf = "0.0"
+                perf = 0.0
+                # On cherche la performance sur les lignes suivantes
                 for j in range(i, min(i+10, len(lines))):
-                    if "%" in lines[j] or (lines[j].replace(',', '.').replace('.', '').isdigit() and 30 < float(lines[j].replace(',', '.')) < 100):
-                        perf = lines[j].replace(',', '.')
-                        break
+                    cleaned_val = lines[j].replace('%', '').replace(',', '.').strip()
+                    try:
+                        val = float(cleaned_val)
+                        if 30 < val < 110: # Range logique de performance BeTrail
+                            perf = val
+                            break
+                    except:
+                        continue
                 
                 races.append({
                     "date": date_course,
                     "nom": nom_course,
                     "performance": perf,
-                    "resultat": "Finisher" # Label par défaut
+                    "resultat": "Finisher"
                 })
-                i += 5 # Sauter vers le bloc suivant
+                i += 3 
             except:
                 i += 1
         else:
