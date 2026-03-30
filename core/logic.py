@@ -7,8 +7,12 @@ def get_ai_response(prompt, profile, metrics, recent_activities, planned_session
     """
     # 1. Configuration de l'API (Clé stockée dans st.secrets)
     try:
-        genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
-        model = genai.GenerativeModel('gemini-pro')
+        api_key = st.secrets.get("GOOGLE_API_KEY")
+        if not api_key:
+            return "⚠️ Configuration IA : GOOGLE_API_KEY manquante dans les secrets Streamlit."
+            
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel('gemini-1.5-flash')
     except Exception as e:
         return f"⚠️ Erreur de configuration de l'IA : {e}"
 
@@ -37,18 +41,24 @@ def get_ai_response(prompt, profile, metrics, recent_activities, planned_session
     except Exception as e:
         return f"❌ Désolé, le coach IA est indisponible : {e}"
 
+def get_coaching_strategy(metrics, profile):
+    """
+    Analyse le TSB pour donner une direction à la semaine (Utilisé par le Dashboard).
+    """
+    tsb = metrics.get('tsb', 0)
+    if tsb < -20:
+        return "🛑 **Priorité Récupération.** Ton corps a besoin d'assimiler la charge."
+    elif -20 <= tsb < 0:
+        return "📈 **Phase de Charge.** Continue la progression avec vigilance."
+    else:
+        return "✨ **Fraîcheur.** Idéal pour des séances de qualité."
+
+def get_ia_coaching_feedback(metrics, profile):
+    """
+    Fonction de compatibilité pour le Dashboard.
+    """
+    return get_coaching_strategy(metrics, profile)
+
 def get_ai_plan(profile, goal_date):
     """Fonction optionnelle pour générer un bloc d'entraînement complet."""
-    # (Tu pourras l'étoffer plus tard)
     return "Planification en cours de développement..."
-```
-
----
-
-### 🗝️ Important : La Clé API
-Pour que ce fichier fonctionne, tu dois avoir une clé API Google (gratuite).
-1. Va sur [Google AI Studio](https://aistudio.google.com/).
-2. Récupère ta clé.
-3. Dans ton dossier de projet, crée (ou ouvre) le fichier `.streamlit/secrets.toml` et ajoute :
-   ```toml
-   GOOGLE_API_KEY = "TA_CLE_ICI"
