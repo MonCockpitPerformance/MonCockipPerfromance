@@ -8,9 +8,8 @@ import os
 from datetime import datetime, timedelta
 
 # --- CONFIGURATION DES CHEMINS (CRITIQUE POUR STREAMLIT CLOUD) ---
-# On remonte d'un niveau pour atteindre la racine du projet où se trouve le dossier 'core'
-current_dir = os.path.dirname(os.path.abspath(__file__)) # tabs/
-root_dir = os.path.dirname(current_dir) # racine/
+current_dir = os.path.dirname(os.path.abspath(__file__))
+root_dir = os.path.dirname(current_dir)
 
 if root_dir not in sys.path:
     sys.path.insert(0, root_dir)
@@ -25,10 +24,9 @@ try:
     )
 except ImportError as e:
     st.error(f"❌ Erreur d'importation des modules : {e}")
-    st.info("Vérifiez que le dossier 'core' contient bien un fichier '__init__.py' vide et que 'logic.py' n'est pas appelé par erreur.")
     st.stop()
 
-# Import du rendu UI (Optionnel)
+# Import du rendu UI personnalisé
 try:
     from core.ui import render_sport_metric
 except ImportError:
@@ -52,15 +50,20 @@ def render(df):
     if 'date' not in df_clean.columns and 'start_date_local' in df_clean.columns:
         df_clean['date'] = pd.to_datetime(df_clean['start_date_local'])
     
+    # On s'assure que les colonnes nécessaires existent, sinon on initialise à 0
+    for col in ['icu_ctl', 'icu_atl', 'icu_training_load']:
+        if col not in df_clean.columns:
+            df_clean[col] = 0
+            
     df_clean = df_clean.fillna(0).sort_values('date')
     
-    # Extraction des métriques clés
+    # Extraction des métriques clés (dernière ligne de données)
     last_row = df_clean.iloc[-1]
     ctl = int(last_row.get('icu_ctl', 0))
     atl = int(last_row.get('icu_atl', 0))
     tsb = int(ctl - atl)
     
-    # Calcul des tendances
+    # Calcul des tendances sur 7 jours
     recent_tss = df_clean['icu_training_load'].tail(7).sum()
     prev_tss = df_clean['icu_training_load'].iloc[-14:-7].sum()
     delta_tss = int(recent_tss - prev_tss)
@@ -75,21 +78,27 @@ def render(df):
     </div>
     """, unsafe_allow_html=True)
 
-    # Affichage des KPIs
+    # Affichage des KPIs via métriques circulaires (si disponibles) ou standards
     col1, col2, col3, col4 = st.columns(4)
     
     with col1:
-        if render_sport_metric: render_sport_metric(ctl, "Condition (CTL)", "#3b82f6", 0, 150)
-        else: st.metric("CTL", ctl)
+        if render_sport_metric: 
+            render_sport_metric(ctl, "Condition (CTL)", "#3b82f6", 0, 150)
+        else: 
+            st.metric("CTL", ctl)
         
     with col2:
-        if render_sport_metric: render_sport_metric(atl, "Fatigue (ATL)", "#a855f7", 0, 180)
-        else: st.metric("ATL", atl)
+        if render_sport_metric: 
+            render_sport_metric(atl, "Fatigue (ATL)", "#a855f7", 0, 180)
+        else: 
+            st.metric("ATL", atl)
         
     with col3:
         tsb_color = "#10b981" if -30 <= tsb <= -10 else ("#ef4444" if tsb < -30 else "#3b82f6")
-        if render_sport_metric: render_sport_metric(tsb, "Forme (TSB)", tsb_color, -50, 50)
-        else: st.metric("TSB", tsb)
+        if render_sport_metric: 
+            render_sport_metric(tsb, "Forme (TSB)", tsb_color, -50, 50)
+        else: 
+            st.metric("TSB", tsb)
 
     with col4:
         st.metric("Charge 7j", f"{int(recent_tss)}", f"{delta_tss:+d} TSS", delta_color="normal")
@@ -106,8 +115,10 @@ def render(df):
         specs=[[{"secondary_y": True}], [{"secondary_y": False}]]
     )
 
+    # Zone optimale de TSB (Freshness)
     fig.add_hrect(y0=-30, y1=-10, fillcolor="#10b981", opacity=0.1, line_width=0, row=1, col=1)
 
+    # Trace ATL (Fatigue)
     fig.add_trace(go.Scatter(
         x=df_clean['date'], y=df_clean['icu_atl'],
         name="Fatigue (ATL)",
@@ -115,12 +126,14 @@ def render(df):
         fill='tozeroy', fillcolor='rgba(168, 85, 247, 0.05)'
     ), row=1, col=1)
 
+    # Trace CTL (Condition)
     fig.add_trace(go.Scatter(
         x=df_clean['date'], y=df_clean['icu_ctl'],
         name="Condition (CTL)",
         line=dict(color='#3b82f6', width=3),
     ), row=1, col=1)
 
+    # Trace TSS (Bars)
     fig.add_trace(go.Bar(
         x=df_clean['date'], y=df_clean['icu_training_load'],
         name="Charge (TSS)",
@@ -128,6 +141,7 @@ def render(df):
         marker_line_width=0
     ), row=1, col=1, secondary_y=True)
 
+    # Trace TSB (Balance)
     fig.add_trace(go.Scatter(
         x=df_clean['date'], y=df_clean['icu_ctl'] - df_clean['icu_atl'],
         name="Forme (TSB)",
@@ -172,7 +186,7 @@ def render(df):
             else:
                 st.info("Format BeTrail non reconnu.")
         else:
-            st.info("Collez vos données BeTrail dans le Profil.")
+            st.info("Collez vos données BeTrail dans l'onglet Profil pour voir votre palmarès ici.")
 
 if __name__ == "__main__":
     pass
