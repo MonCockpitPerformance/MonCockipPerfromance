@@ -44,7 +44,7 @@ def init_firebase():
             return None, None
     try:
         return firestore.client(), auth
-    except:
+    except Exception:
         return None, None
 
 # --- GESTION DU PROFIL ---
@@ -110,7 +110,11 @@ def get_athlete_fitness(intervals_id, api_key):
     try:
         response = requests.get(url, headers=headers, timeout=10)
         if response.status_code == 200:
-            df = pd.DataFrame(response.json())
+            data = response.json()
+            if not data:
+                return pd.DataFrame()
+            
+            df = pd.DataFrame(data)
             if not df.empty and 'start_date_local' in df.columns:
                 df['date'] = pd.to_datetime(df['start_date_local'])
                 # Conversion numérique des colonnes clés
@@ -167,17 +171,12 @@ def haversine(lat1, lon1, lat2, lon2):
 
 # --- PARSING BETRAIL (V2 Robuste) ---
 def parse_betrail_paste(raw_text):
-    """
-    Analyse le copier-coller brut de la page palmarès BeTrail.
-    Format attendu : lignes répétitives incluant Date, Nom, Distance, D+, Performance.
-    """
+    """Analyse le copier-coller brut de la page palmarès BeTrail."""
     if not raw_text or len(str(raw_text).strip()) < 10:
         return []
     
     races = []
     lines = [l.strip() for l in str(raw_text).split('\n') if l.strip()]
-    
-    # Pattern de détection : cherche une ligne avec une date (JJ/MM/AAAA)
     date_pattern = r"(\d{2}/\d{2}/\d{4})"
     
     i = 0
@@ -185,26 +184,32 @@ def parse_betrail_paste(raw_text):
         match = re.search(date_pattern, lines[i])
         if match:
             try:
-                # Structure type BeTrail : souvent le nom est au dessus ou en dessous
-                # On essaie de capturer un bloc cohérent
                 date_course = match.group(1)
                 nom_course = lines[i-1] if i > 0 else "Course Inconnue"
                 
-                # Recherche de la performance (un nombre souvent entre 40 et 100)
                 perf = "0.0"
                 for j in range(i, min(i+10, len(lines))):
-                    if "%" in lines[j] or (lines[j].replace(',', '.').replace('.', '').isdigit() and 30 < float(lines[j].replace(',', '.')) < 100):
-                        perf = lines[j].replace(',', '.')
-                        break
+                    content = lines[j].replace(',', '.')
+                    # Détection d'un nombre flottant entre 30 et 100
+                    if "%" in lines[j]:
+                         perf = lines[j].replace('%', '').strip().replace(',', '.')
+                         break
+                    try:
+                        val = float(content)
+                        if 30 < val < 100:
+                            perf = str(val)
+                            break
+                    except ValueError:
+                        continue
                 
                 races.append({
                     "date": date_course,
                     "nom": nom_course,
                     "performance": perf,
-                    "resultat": "Finisher" # Label par défaut
+                    "resultat": "Finisher"
                 })
-                i += 5 # Sauter vers le bloc suivant
-            except:
+                i += 3 
+            except Exception:
                 i += 1
         else:
             i += 1
