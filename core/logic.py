@@ -1,64 +1,212 @@
 import streamlit as st
-import google.generativeai as genai
+import requests
+import base64
+import pandas as pd
+import firebase_admin
+from firebase_admin import credentials, firestore, auth
+import re
+import json
+import xml.etree.ElementTree as ET
+import numpy as np
+from datetime import datetime
 
-def get_ai_response(prompt, profile, metrics, recent_activities, planned_sessions, betrail_history):
-    """
-    Envoie le contexte complet de l'athlète à Gemini et récupère son analyse.
-    """
-    # 1. Configuration de l'API (Clé stockée dans st.secrets)
-    try:
-        api_key = st.secrets.get("GOOGLE_API_KEY")
-        if not api_key:
-            return "⚠️ Configuration IA : GOOGLE_API_KEY manquante dans les secrets Streamlit."
+# --- INITIALISATION FIREBASE ---
+def init_firebase():
+    """Initialise Firebase Admin SDK avec les secrets Streamlit."""
+    if not firebase_admin._apps:
+        try:
+            if "firebase" not in st.secrets:
+                return None, None
+            fb_conf = st.secrets["firebase"]
             
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel('gemini-1.5-flash')
-    except Exception as e:
-        return f"⚠️ Erreur de configuration de l'IA : {e}"
-
-    # 2. Construction du "Cerveau" (Le Prompt Système)
-    system_context = f"""
-    Tu es un coach expert en Trail et Ultra-trail. 
-    Ton athlète a un indice BeTrail de {profile.get('betrail_index', 'inconnu')}.
-    Son objectif est : {profile.get('next_race_name', 'non défini')}.
-    
-    Données actuelles :
-    - Forme (CTL) : {metrics.get('ctl', 0)}
-    - Fatigue (ATL) : {metrics.get('atl', 0)}
-    - État (TSB) : {metrics.get('tsb', 0)} (Positif = frais, Négatif = fatigué)
-    
-    Historique récent : {recent_activities[-3:] if recent_activities else 'Aucune donnée'}
-    Séances prévues : {planned_sessions[:3] if planned_sessions else 'Rien de prévu'}
-    
-    Réponds de manière concise, technique mais motivante. Utilise des emojis sportifs.
-    """
-
-    # 3. Appel à Gemini
+            # Nettoyage de la clé privée (gestion des guillemets et sauts de ligne)
+            raw_key = fb_conf.get("private_key", "").strip()
+            if raw_key.startswith('"') and raw_key.endswith('"'):
+                raw_key = raw_key[1:-1]
+            private_key = raw_key.replace("\\n", "\n")
+            
+            creds_dict = {
+                "type": fb_conf["type"],
+                "project_id": fb_conf["project_id"],
+                "private_key_id": fb_conf["private_key_id"],
+                "private_key": private_key,
+                "client_email": fb_conf["client_email"],
+                "client_id": fb_conf["client_id"],
+                "auth_uri": fb_conf["auth_uri"],
+                "token_uri": fb_conf["token_uri"],
+                "auth_provider_x509_cert_url": fb_conf["auth_provider_x509_cert_url"],
+                "client_x509_cert_url": fb_conf["client_x509_cert_url"]
+            }
+            cred = credentials.Certificate(creds_dict)
+            firebase_admin.initialize_app(cred)
+        except Exception as e:
+            st.error(f"Erreur d'initialisation Firebase : {e}")
+            return None, None
     try:
-        full_prompt = f"{system_context}\n\nL'athlète demande : {prompt}"
-        response = model.generate_content(full_prompt)
-        return response.text
+        return firestore.client(), auth
+    except:
+        return None, None
+
+# --- GESTION DU PROFIL ---
+def load_profile(user_id):
+    """Charge le profil utilisateur depuis la collection 'profiles'."""
+    db, _ = init_firebase()
+    default_profile = {
+        "intervals_id": "",
+        "api_key": "",
+        "betrail_index": 50.0,
+        "weekly_sessions_target": 3,
+        "race_plan": [],
+        "checkpoints": [],
+        "betrail_paste": ""
+    }
+    
+    if not db: 
+        return default_profile
+    
+    try:
+        doc_ref = db.collection("profiles").document(user_id)
+        doc = doc_ref.get()
+        if doc.exists:
+            profile = doc.to_dict()
+            # Fusion avec les valeurs par défaut pour garantir les clés
+            for key, val in default_profile.items():
+                if key not in profile:
+                    profile[key] = val
+            return profile
     except Exception as e:
-        return f"❌ Désolé, le coach IA est indisponible : {e}"
+        st.error(f"Erreur chargement profil : {e}")
+    
+    return default_profile
 
-def get_coaching_strategy(metrics, profile):
-    """
-    Analyse le TSB pour donner une direction à la semaine (Utilisé par le Dashboard).
-    """
-    tsb = metrics.get('tsb', 0)
-    if tsb < -20:
-        return "🛑 **Priorité Récupération.** Ton corps a besoin d'assimiler la charge."
-    elif -20 <= tsb < 0:
-        return "📈 **Phase de Charge.** Continue la progression avec vigilance."
-    else:
-        return "✨ **Fraîcheur.** Idéal pour des séances de qualité."
+def save_user_profile(user_id, data):
+    """Sauvegarde ou met à jour le profil utilisateur (merge=True)."""
+    db, _ = init_firebase()
+    if not db: return
+    doc_ref = db.collection("profiles").document(user_id)
+    try:
+        doc_ref.set(data, merge=True)
+    except Exception as e:
+        st.error(f"Erreur sauvegarde profil : {e}")
 
-def get_ia_coaching_feedback(metrics, profile):
-    """
-    Fonction de compatibilité pour le Dashboard.
-    """
-    return get_coaching_strategy(metrics, profile)
+# Alias pour compatibilité
+save_profile = save_user_profile
 
-def get_ai_plan(profile, goal_date):
-    """Fonction optionnelle pour générer un bloc d'entraînement complet."""
-    return "Planification en cours de développement..."
+# --- RÉCUPÉRATION INTERVALS.ICU ---
+@st.cache_data(ttl=600)
+def get_athlete_fitness(intervals_id, api_key):
+    """Récupère les données Fitness (CTL/ATL/TSB) depuis Intervals.icu."""
+    if not intervals_id or not api_key:
+        return pd.DataFrame()
+
+    # On récupère les activités depuis le début de l'année en cours
+    year = datetime.now().year
+    url = f"https://intervals.icu/api/v1/athlete/{intervals_id}/activities?oldest={year}-01-01"
+    
+    auth_str = f"API_KEY:{api_key}"
+    encoded_auth = base64.b64encode(auth_str.encode()).decode()
+    headers = {"Authorization": f"Basic {encoded_auth}"}
+
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        if response.status_code == 200:
+            df = pd.DataFrame(response.json())
+            if not df.empty and 'start_date_local' in df.columns:
+                df['date'] = pd.to_datetime(df['start_date_local'])
+                # Conversion numérique des colonnes clés
+                cols = ['icu_ctl', 'icu_atl', 'icu_tsb', 'icu_training_load']
+                for col in cols:
+                    if col in df.columns:
+                        df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+                return df.sort_values('date')
+        return pd.DataFrame()
+    except Exception:
+        return pd.DataFrame()
+
+# --- TRAITEMENT GPX ---
+def parse_gpx_file(file):
+    """Extrait la distance et l'élévation d'un fichier GPX."""
+    try:
+        file_content = file.read()
+        root = ET.fromstring(file_content)
+        ns_match = re.match(r'\{(.*)\}', root.tag)
+        ns = {'gpx': ns_match.group(1)} if ns_match else {'gpx': 'http://www.topografix.com/GPX/1/1'}
+        
+        data = []
+        total_dist = 0.0
+        total_gain = 0.0
+        last_lat, last_lon, last_ele = None, None, None
+        
+        for trkpt in root.findall('.//gpx:trkpt', ns):
+            lat = float(trkpt.get('lat'))
+            lon = float(trkpt.get('lon'))
+            ele_tag = trkpt.find('gpx:ele', ns)
+            ele = float(ele_tag.text) if ele_tag is not None else 0
+            
+            if last_lat is not None:
+                d = haversine(last_lat, last_lon, lat, lon)
+                total_dist += d
+                diff = ele - last_ele
+                if diff > 0: total_gain += diff
+            
+            data.append({"distance": round(total_dist, 3), "elevation": round(ele, 1)})
+            last_lat, last_lon, last_ele = lat, lon, ele
+        
+        return pd.DataFrame(data)
+    except Exception as e:
+        st.error(f"Erreur GPX : {e}")
+        return pd.DataFrame()
+
+def haversine(lat1, lon1, lat2, lon2):
+    """Calcul de distance entre deux points GPS en km."""
+    R = 6371.0
+    phi1, phi2 = np.radians(lat1), np.radians(lat2)
+    dphi, dlambda = np.radians(lat2 - lat1), np.radians(lon2 - lon1)
+    a = np.sin(dphi/2.0)**2 + np.cos(phi1)*np.cos(phi2)*np.sin(dlambda/2.0)**2
+    return R * 2 * np.arctan2(np.sqrt(a), np.sqrt(1.0-a))
+
+# --- PARSING BETRAIL (V2 Robuste) ---
+def parse_betrail_paste(raw_text):
+    """
+    Analyse le copier-coller brut de la page palmarès BeTrail.
+    Format attendu : lignes répétitives incluant Date, Nom, Distance, D+, Performance.
+    """
+    if not raw_text or len(str(raw_text).strip()) < 10:
+        return []
+    
+    races = []
+    lines = [l.strip() for l in str(raw_text).split('\n') if l.strip()]
+    
+    # Pattern de détection : cherche une ligne avec une date (JJ/MM/AAAA)
+    date_pattern = r"(\d{2}/\d{2}/\d{4})"
+    
+    i = 0
+    while i < len(lines):
+        match = re.search(date_pattern, lines[i])
+        if match:
+            try:
+                # Structure type BeTrail : souvent le nom est au dessus ou en dessous
+                # On essaie de capturer un bloc cohérent
+                date_course = match.group(1)
+                nom_course = lines[i-1] if i > 0 else "Course Inconnue"
+                
+                # Recherche de la performance (un nombre souvent entre 40 et 100)
+                perf = "0.0"
+                for j in range(i, min(i+10, len(lines))):
+                    if "%" in lines[j] or (lines[j].replace(',', '.').replace('.', '').isdigit() and 30 < float(lines[j].replace(',', '.')) < 100):
+                        perf = lines[j].replace(',', '.')
+                        break
+                
+                races.append({
+                    "date": date_course,
+                    "nom": nom_course,
+                    "performance": perf,
+                    "resultat": "Finisher" # Label par défaut
+                })
+                i += 5 # Sauter vers le bloc suivant
+            except:
+                i += 1
+        else:
+            i += 1
+            
+    return races
