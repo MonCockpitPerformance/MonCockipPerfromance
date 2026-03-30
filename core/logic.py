@@ -1,217 +1,92 @@
-import streamlit as st
-import requests
-import base64
-import pandas as pd
-import firebase_admin
-from firebase_admin import credentials, firestore, auth
-import re
-import json
-import xml.etree.ElementTree as ET
 import numpy as np
-from datetime import datetime
+import pandas as pd
+from datetime import datetime, timedelta
+import streamlit as st
 
-# --- INITIALISATION FIREBASE ---
-def init_firebase():
-    """Initialise Firebase Admin SDK avec les secrets Streamlit."""
-    if not firebase_admin._apps:
-        try:
-            if "firebase" not in st.secrets:
-                return None, None
-            fb_conf = st.secrets["firebase"]
-            
-            # Nettoyage de la clé privée (gestion des guillemets et sauts de ligne)
-            raw_key = fb_conf.get("private_key", "").strip()
-            if raw_key.startswith('"') and raw_key.endswith('"'):
-                raw_key = raw_key[1:-1]
-            private_key = raw_key.replace("\\n", "\n")
-            
-            creds_dict = {
-                "type": fb_conf["type"],
-                "project_id": fb_conf["project_id"],
-                "private_key_id": fb_conf["private_key_id"],
-                "private_key": private_key,
-                "client_email": fb_conf["client_email"],
-                "client_id": fb_conf["client_id"],
-                "auth_uri": fb_conf["auth_uri"],
-                "token_uri": fb_conf["token_uri"],
-                "auth_provider_x509_cert_url": fb_conf["auth_provider_x509_cert_url"],
-                "client_x509_cert_url": fb_conf["client_x509_cert_url"]
-            }
-            cred = credentials.Certificate(creds_dict)
-            firebase_admin.initialize_app(cred)
-        except Exception as e:
-            st.error(f"Erreur d'initialisation Firebase : {e}")
-            return None, None
-    try:
-        return firestore.client(), auth
-    except Exception:
-        return None, None
+# On importe les fonctions nécessaires depuis data.py pour éviter la duplication
+from core.data import ensure_dataframe
 
-# --- GESTION DU PROFIL ---
-def load_profile(user_id):
-    """Charge le profil utilisateur depuis la collection 'profiles'."""
-    db, _ = init_firebase()
-    default_profile = {
-        "intervals_id": "",
-        "api_key": "",
-        "betrail_index": 50.0,
-        "weekly_sessions_target": 3,
-        "race_plan": [],
-        "checkpoints": [],
-        "betrail_paste": ""
+def calculate_race_prediction(km, d_plus, betrail_index):
+    """
+    Calcule le temps estimé d'une course.
+    Formule basée sur l'effort corrigé (km + d+/100) et l'indice de performance.
+    """
+    if not betrail_index or betrail_index <= 0:
+        return None
+    
+    # Effort corrigé (méthode classique trail : 1km = 100m D+)
+    effort_km = km + (d_plus / 100.0)
+    
+    # L'indice BeTrail reflète la vitesse sur un effort corrigé.
+    # Un indice de 50 correspond environ à 6.5 km effort / h
+    # On utilise une base de référence (ajustable selon tes tests)
+    base_speed_effort = (betrail_index / 50.0) * 6.5
+    
+    time_hours = effort_km / base_speed_effort
+    
+    return {
+        "hours": time_hours,
+        "effort_km": effort_km,
+        "speed_kmh": km / time_hours if time_hours > 0 else 0
     }
+
+def get_training_status(fitness_df):
+    """
+    Analyse le dernier état de forme (CTL/ATL/TSB).
+    """
+    df = ensure_dataframe(fitness_df)
+    if df.empty or 'icu_ctl' not in df.columns:
+        return None
     
-    if not db: 
-        return default_profile
+    last_row = df.iloc[-1]
+    ctl = last_row['icu_ctl']
+    atl = last_row['icu_atl']
+    tsb = last_row['icu_tsb']
     
-    try:
-        doc_ref = db.collection("profiles").document(user_id)
-        doc = doc_ref.get()
-        if doc.exists:
-            profile = doc.to_dict()
-            # Fusion avec les valeurs par défaut pour garantir les clés
-            for key, val in default_profile.items():
-                if key not in profile:
-                    profile[key] = val
-            return profile
-    except Exception as e:
-        st.error(f"Erreur chargement profil : {e}")
+    # Détermination de la zone (Freshness/Form)
+    if tsb > 5: status = "Frais (Optimisation)"
+    elif tsb < -20: status = "Surentraînement (Risque)"
+    elif tsb < -10: status = "Productif"
+    else: status = "Neutre"
     
-    return default_profile
+    return {
+        "ctl": round(ctl, 1),
+        "atl": round(atl, 1),
+        "tsb": round(tsb, 1),
+        "status": status
+    }
 
-def save_user_profile(user_id, data):
-    """Sauvegarde ou met à jour le profil utilisateur (merge=True)."""
-    db, _ = init_firebase()
-    if not db: return
-    doc_ref = db.collection("profiles").document(user_id)
-    try:
-        doc_ref.set(data, merge=True)
-    except Exception as e:
-        st.error(f"Erreur sauvegarde profil : {e}")
-
-# Alias pour compatibilité
-save_profile = save_user_profile
-
-# --- RÉCUPÉRATION INTERVALS.ICU ---
-@st.cache_data(ttl=600)
-def get_athlete_fitness(intervals_id, api_key):
-    """Récupère les données Fitness (CTL/ATL/TSB) depuis Intervals.icu."""
-    if not intervals_id or not api_key:
-        return pd.DataFrame()
-
-    # On récupère les activités depuis le début de l'année en cours
-    year = datetime.now().year
-    url = f"https://intervals.icu/api/v1/athlete/{intervals_id}/activities?oldest={year}-01-01"
+def estimate_finish_time_from_gpx(gpx_df, betrail_index):
+    """
+    Utilise les données point par point du GPX pour une estimation fine.
+    """
+    df = ensure_dataframe(gpx_df)
+    if df.empty:
+        return None
     
-    auth_str = f"API_KEY:{api_key}"
-    encoded_auth = base64.b64encode(auth_str.encode()).decode()
-    headers = {"Authorization": f"Basic {encoded_auth}"}
-
-    try:
-        response = requests.get(url, headers=headers, timeout=10)
-        if response.status_code == 200:
-            data = response.json()
-            if not data:
-                return pd.DataFrame()
-            
-            df = pd.DataFrame(data)
-            if not df.empty and 'start_date_local' in df.columns:
-                df['date'] = pd.to_datetime(df['start_date_local'])
-                # Conversion numérique des colonnes clés
-                cols = ['icu_ctl', 'icu_atl', 'icu_tsb', 'icu_training_load']
-                for col in cols:
-                    if col in df.columns:
-                        df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
-                return df.sort_values('date')
-        return pd.DataFrame()
-    except Exception:
-        return pd.DataFrame()
-
-# --- TRAITEMENT GPX ---
-def parse_gpx_file(file):
-    """Extrait la distance et l'élévation d'un fichier GPX."""
-    try:
-        file_content = file.read()
-        root = ET.fromstring(file_content)
-        ns_match = re.match(r'\{(.*)\}', root.tag)
-        ns = {'gpx': ns_match.group(1)} if ns_match else {'gpx': 'http://www.topografix.com/GPX/1/1'}
+    total_km = df['distance'].max()
+    # On calcule le D+ total à partir des deltas d'élévation positifs
+    df['ele_diff'] = df['elevation'].diff().fillna(0)
+    total_d_plus = df[df['ele_diff'] > 0]['ele_diff'].sum()
+    
+    prediction = calculate_race_prediction(total_km, total_d_plus, betrail_index)
+    
+    if prediction:
+        prediction['total_km'] = total_km
+        prediction['total_d_plus'] = total_d_plus
         
-        data = []
-        total_dist = 0.0
-        total_gain = 0.0
-        last_lat, last_lon, last_ele = None, None, None
-        
-        for trkpt in root.findall('.//gpx:trkpt', ns):
-            lat = float(trkpt.get('lat'))
-            lon = float(trkpt.get('lon'))
-            ele_tag = trkpt.find('gpx:ele', ns)
-            ele = float(ele_tag.text) if ele_tag is not None else 0
-            
-            if last_lat is not None:
-                d = haversine(last_lat, last_lon, lat, lon)
-                total_dist += d
-                diff = ele - last_ele
-                if diff > 0: total_gain += diff
-            
-            data.append({"distance": round(total_dist, 3), "elevation": round(ele, 1)})
-            last_lat, last_lon, last_ele = lat, lon, ele
-        
-        return pd.DataFrame(data)
-    except Exception as e:
-        st.error(f"Erreur GPX : {e}")
-        return pd.DataFrame()
+    return prediction
 
-def haversine(lat1, lon1, lat2, lon2):
-    """Calcul de distance entre deux points GPS en km."""
-    R = 6371.0
-    phi1, phi2 = np.radians(lat1), np.radians(lat2)
-    dphi, dlambda = np.radians(lat2 - lat1), np.radians(lon2 - lon1)
-    a = np.sin(dphi/2.0)**2 + np.cos(phi1)*np.cos(phi2)*np.sin(dlambda/2.0)**2
-    return R * 2 * np.arctan2(np.sqrt(a), np.sqrt(1.0-a))
-
-# --- PARSING BETRAIL (V2 Robuste) ---
-def parse_betrail_paste(raw_text):
-    """Analyse le copier-coller brut de la page palmarès BeTrail."""
-    if not raw_text or len(str(raw_text).strip()) < 10:
-        return []
+def calculate_pace_zones(betrail_index):
+    """Génère des zones d'allure théoriques basées sur le niveau BeTrail."""
+    # Vitesse de base effort (100%)
+    vbe = (betrail_index / 50.0) * 7.0 
     
-    races = []
-    lines = [l.strip() for l in str(raw_text).split('\n') if l.strip()]
-    date_pattern = r"(\d{2}/\d{2}/\d{4})"
-    
-    i = 0
-    while i < len(lines):
-        match = re.search(date_pattern, lines[i])
-        if match:
-            try:
-                date_course = match.group(1)
-                nom_course = lines[i-1] if i > 0 else "Course Inconnue"
-                
-                perf = "0.0"
-                for j in range(i, min(i+10, len(lines))):
-                    content = lines[j].replace(',', '.')
-                    # Détection d'un nombre flottant entre 30 et 100
-                    if "%" in lines[j]:
-                         perf = lines[j].replace('%', '').strip().replace(',', '.')
-                         break
-                    try:
-                        val = float(content)
-                        if 30 < val < 100:
-                            perf = str(val)
-                            break
-                    except ValueError:
-                        continue
-                
-                races.append({
-                    "date": date_course,
-                    "nom": nom_course,
-                    "performance": perf,
-                    "resultat": "Finisher"
-                })
-                i += 3 
-            except Exception:
-                i += 1
-        else:
-            i += 1
-            
-    return races
+    zones = {
+        "Z1 (Récupération)": vbe * 0.60,
+        "Z2 (Endurance)": vbe * 0.75,
+        "Z3 (Tempo)": vbe * 0.85,
+        "Z4 (Seuil)": vbe * 0.95,
+        "Z5 (VMA)": vbe * 1.10
+    }
+    return zones
