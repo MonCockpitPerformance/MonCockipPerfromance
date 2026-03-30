@@ -88,7 +88,6 @@ def get_athlete_fitness(intervals_id, api_key):
     if not intervals_id or not api_key:
         return pd.DataFrame()
 
-    # On récupère les activités depuis 2026 pour avoir le futur/proche passé
     url = f"https://intervals.icu/api/v1/athlete/{intervals_id}/activities?oldest=2026-01-01"
     
     auth_str = f"API_KEY:{api_key}"
@@ -111,16 +110,10 @@ def get_athlete_fitness(intervals_id, api_key):
 
 # --- TRAITEMENT GPX POUR PROFIL ALTIMÉTRIQUE ---
 def parse_gpx_file(file):
-    """
-    Extrait la distance et l'élévation d'un fichier GPX avec analyse de dénivelé.
-    Compatible avec différents namespaces GPX.
-    """
+    """Extrait la distance et l'élévation d'un fichier GPX."""
     try:
-        # On lit le contenu pour gérer les namespaces dynamiquement
         file_content = file.read()
         root = ET.fromstring(file_content)
-        
-        # Trouver le namespace par défaut
         ns_match = re.match(r'\{(.*)\}', root.tag)
         ns = {'gpx': ns_match.group(1)} if ns_match else {'gpx': 'http://www.topografix.com/GPX/1/1'}
         
@@ -133,113 +126,87 @@ def parse_gpx_file(file):
         for trkpt in root.findall('.//gpx:trkpt', ns):
             lat = float(trkpt.get('lat'))
             lon = float(trkpt.get('lon'))
-            
-            # Recherche de l'élévation
             ele_tag = trkpt.find('gpx:ele', ns)
             ele = float(ele_tag.text) if ele_tag is not None else 0
             
             if last_lat is not None:
-                # Calcul distance
                 d = haversine(last_lat, last_lon, lat, lon)
                 total_dist += d
-                
-                # Calcul dénivelé
                 diff = ele - last_ele
-                if diff > 0:
-                    total_gain += diff
-                else:
-                    total_loss += abs(diff)
+                if diff > 0: total_gain += diff
+                else: total_loss += abs(diff)
             
-            data.append({
-                "distance": round(total_dist, 3), 
-                "elevation": round(ele, 1)
-            })
+            data.append({"distance": round(total_dist, 3), "elevation": round(ele, 1)})
             last_lat, last_lon, last_ele = lat, lon, ele
         
-        if not data:
-            st.error("Aucun point trouvé dans le fichier GPX.")
-            return pd.DataFrame()
-
-        # Affichage du message de succès dans Streamlit
-        st.success(f"✅ Fichier reçu ! (Analyse du dénivelé terminée)")
-        st.info(f"📊 Résumé du parcours : **{total_dist:.2f} km** | **+{int(total_gain)}m** / **-{int(total_loss)}m**")
-            
+        if not data: return pd.DataFrame()
+        st.success(f"✅ GPX analysé : {total_dist:.2f}km | +{int(total_gain)}m")
         return pd.DataFrame(data)
     except Exception as e:
-        st.error(f"Erreur lors de l'analyse du GPX : {e}")
+        st.error(f"Erreur GPX : {e}")
         return pd.DataFrame()
 
 def haversine(lat1, lon1, lat2, lon2):
-    """Calcul de distance entre deux points en km (Formule de Haversine)."""
-    R = 6371.0 # Rayon de la Terre en km
+    R = 6371.0
     phi1, phi2 = np.radians(lat1), np.radians(lat2)
-    dphi = np.radians(lat2 - lat1)
-    dlambda = np.radians(lon2 - lon1)
+    dphi, dlambda = np.radians(lat2 - lat1), np.radians(lon2 - lon1)
     a = np.sin(dphi/2.0)**2 + np.cos(phi1)*np.cos(phi2)*np.sin(dlambda/2.0)**2
-    c = 2 * np.arctan2(np.sqrt(a), np.sqrt(1.0-a))
-    return R * c
+    return R * 2 * np.arctan2(np.sqrt(a), np.sqrt(1.0-a))
 
 # --- RÉCUPÉRATION NOLIO ---
 def get_nolio_sessions(api_token, start_date, end_date):
-    """Récupère les séances prévues sur Nolio."""
-    if not api_token:
-        return []
-
+    if not api_token: return []
     url = f"https://api.nolio.io/athelte/session/?start={start_date}&end={end_date}"
-    headers = {
-        "Authorization": f"Bearer {api_token}",
-        "Content-Type": "application/json"
-    }
-
+    headers = {"Authorization": f"Bearer {api_token}", "Content-Type": "application/json"}
     try:
         response = requests.get(url, headers=headers, timeout=10)
-        if response.status_code == 200:
-            return response.json()
-        return []
-    except Exception:
-        return []
+        return response.json() if response.status_code == 200 else []
+    except Exception: return []
 
-# --- PARSING BETRAIL (MULTI-LIGNES) ---
+# --- PARSING BETRAIL ---
 def parse_betrail_paste(raw_text):
-    """Analyse le copier-coller BeTrail intelligent."""
-    if not raw_text or len(str(raw_text).strip()) < 10:
-        return []
-
+    if not raw_text or len(str(raw_text).strip()) < 10: return []
     races = []
     lines = [l.strip() for l in str(raw_text).split('\n') if l.strip()]
-    
     i = 0
     while i < len(lines):
-        # Détection d'un en-tête de course BeTrail (souvent avec un classement ou "/" ou CLOCK)
         if "/" in lines[i] or "CLOCK" in lines[i]:
             try:
                 cursor = i + 1
                 nom = lines[cursor]
                 cursor += 1
-                if lines[cursor].lower() in ['ultra', 'long', 'short', 'medium']:
-                    cursor += 1
+                if lines[cursor].lower() in ['ultra', 'long', 'short', 'medium']: cursor += 1
                 date_course = lines[cursor]
                 cursor += 1
-                distance = lines[cursor]
-                cursor += 1
-                dplus = lines[cursor]
-                cursor += 1
-                temps = lines[cursor]
-                cursor += 1
-                pts = lines[cursor]
-                cursor += 1
+                distance, dplus = lines[cursor], lines[cursor+1]
+                cursor += 4
                 perf = lines[cursor]
-                
-                races.append({
-                    "Date": date_course,
-                    "Course": nom,
-                    "Détails": f"{distance} / {dplus}",
-                    "Rang": lines[i],
-                    "Perf": perf.replace(',', '.')
-                })
+                races.append({"Date": date_course, "Course": nom, "Détails": f"{distance} / {dplus}", "Perf": perf.replace(',', '.')})
                 i = cursor + 1
-            except Exception:
-                i += 1
-        else:
-            i += 1
+            except: i += 1
+        else: i += 1
     return races
+
+# --- NOUVELLES FONCTIONS DE COACHING (POUR RÉPARER LE BUG) ---
+def get_ia_coaching_feedback(df):
+    """Génère un conseil basé sur les données Intervals.icu (Utilisé par dashboard.py)."""
+    if df.empty:
+        return "Connectez votre compte Intervals.icu dans l'onglet Profil pour recevoir votre analyse personnalisée."
+    
+    last_ctl = df['icu_ctl'].iloc[-1] if 'icu_ctl' in df.columns else 0
+    last_tsb = df['icu_tsb'].iloc[-1] if 'icu_tsb' in df.columns else 0
+    
+    if last_tsb < -20:
+        status = "Attention à la fatigue (TSB très bas)."
+    elif last_tsb > 5:
+        status = "Phase de fraîcheur, prêt pour un bloc intense ou une course."
+    else:
+        status = "Charge d'entraînement équilibrée."
+        
+    return f"Analyse Flash : Votre Fitness (CTL) est de {last_ctl:.0f}. {status}"
+
+def get_coaching_strategy(df):
+    """Définit la stratégie actuelle (Utilisé par dashboard.py)."""
+    if df.empty:
+        return "En attente de données..."
+    return "Optimisation de l'endurance aérobie."
