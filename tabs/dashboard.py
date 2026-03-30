@@ -7,13 +7,15 @@ import sys
 import os
 from datetime import datetime, timedelta
 
-# --- FORCE LE CHEMIN POUR STREAMLIT CLOUD ---
-# Cela permet à Python de trouver le dossier 'core' même si la structure est complexe
-current_dir = os.path.dirname(os.path.abspath(__file__))
-if current_dir not in sys.path:
-    sys.path.append(current_dir)
+# --- CONFIGURATION DES CHEMINS (CRITIQUE POUR STREAMLIT CLOUD) ---
+# On remonte d'un niveau pour atteindre la racine du projet où se trouve le dossier 'core'
+current_dir = os.path.dirname(os.path.abspath(__file__)) # tabs/
+root_dir = os.path.dirname(current_dir) # racine/
 
-# On tente l'importation propre
+if root_dir not in sys.path:
+    sys.path.insert(0, root_dir)
+
+# --- IMPORTS DEPUIS CORE ---
 try:
     from core.data import (
         load_profile, 
@@ -22,11 +24,11 @@ try:
         parse_betrail_paste
     )
 except ImportError as e:
-    st.error(f"Erreur d'importation : {e}")
-    st.info("Vérifiez que le dossier 'core' contient bien un fichier '__init__.py' vide.")
+    st.error(f"❌ Erreur d'importation des modules : {e}")
+    st.info("Vérifiez que le dossier 'core' contient bien un fichier '__init__.py' vide et que 'logic.py' n'est pas appelé par erreur.")
     st.stop()
 
-# Import du rendu UI
+# Import du rendu UI (Optionnel)
 try:
     from core.ui import render_sport_metric
 except ImportError:
@@ -34,12 +36,8 @@ except ImportError:
 
 def render(df):
     # --- 1. CONTEXTE ET AUTHENTIFICATION ---
-    user_id = st.session_state.get('uid') or (st.session_state.get('user', {}).get('uid') if st.session_state.get('user') else None)
+    user_id = st.session_state.get('uid') or (st.session_state.get('user', {}).get('uid') if st.session_state.get('user') else "athlete_default")
     
-    if not user_id:
-        st.warning("⚠️ Session interrompue. Veuillez vous reconnecter.")
-        return
-        
     prof = load_profile(user_id)
     st.title("🚀 Cockpit Performance")
 
@@ -56,27 +54,26 @@ def render(df):
     
     df_clean = df_clean.fillna(0).sort_values('date')
     
-    # Extraction des métriques clés (dernière valeur connue)
+    # Extraction des métriques clés
     last_row = df_clean.iloc[-1]
     ctl = int(last_row.get('icu_ctl', 0))
     atl = int(last_row.get('icu_atl', 0))
     tsb = int(ctl - atl)
     
-    # Calcul des tendances (7 derniers jours vs 7 précédents)
+    # Calcul des tendances
     recent_tss = df_clean['icu_training_load'].tail(7).sum()
     prev_tss = df_clean['icu_training_load'].iloc[-14:-7].sum()
     delta_tss = int(recent_tss - prev_tss)
 
     # --- 3. SECTION COACHING & STRATÉGIE ---
-    with st.container():
-        strat_label = get_coaching_strategy(df_clean)
-        strat_color = "#10b981" if "Optimal" in strat_label else ("#f59e0b" if "Surcharge" in strat_label else "#3b82f6")
-        
-        st.markdown(f"""
-        <div style="background: {strat_color}22; padding: 15px; border-radius: 10px; border-left: 5px solid {strat_color}; margin-bottom: 20px;">
-            <h4 style="margin:0; color:{strat_color};">🎯 Focus actuel : {strat_label}</h4>
-        </div>
-        """, unsafe_allow_value=True)
+    strat_label = get_coaching_strategy(df_clean)
+    strat_color = "#10b981" if "Optimal" in strat_label else ("#f59e0b" if "Surcharge" in strat_label else "#3b82f6")
+    
+    st.markdown(f"""
+    <div style="background: {strat_color}22; padding: 15px; border-radius: 10px; border-left: 5px solid {strat_color}; margin-bottom: 20px;">
+        <h4 style="margin:0; color:{strat_color};">🎯 Focus actuel : {strat_label}</h4>
+    </div>
+    """, unsafe_allow_html=True)
 
     # Affichage des KPIs
     col1, col2, col3, col4 = st.columns(4)
@@ -161,7 +158,7 @@ def render(df):
         <div style="background: #1e293b; padding: 20px; border-radius: 15px; border: 1px solid #334155;">
             <p style="color: #cbd5e1; font-size: 0.95rem; line-height: 1.6;">{feedback}</p>
         </div>
-        """, unsafe_allow_value=True)
+        """, unsafe_allow_html=True)
 
     with col_bt:
         st.subheader("🏆 BeTrail")
