@@ -3,15 +3,28 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import pandas as pd
 import numpy as np
+import sys
+import os
 from datetime import datetime, timedelta
 
-# On importe tout depuis core.data (logique centralisée)
-from core.data import (
-    load_profile, 
-    get_ia_coaching_feedback, 
-    get_coaching_strategy,
-    parse_betrail_paste
-)
+# --- FORCE LE CHEMIN POUR STREAMLIT CLOUD ---
+# Cela permet à Python de trouver le dossier 'core' même si la structure est complexe
+current_dir = os.path.dirname(os.path.abspath(__file__))
+if current_dir not in sys.path:
+    sys.path.append(current_dir)
+
+# On tente l'importation propre
+try:
+    from core.data import (
+        load_profile, 
+        get_ia_coaching_feedback, 
+        get_coaching_strategy,
+        parse_betrail_paste
+    )
+except ImportError as e:
+    st.error(f"Erreur d'importation : {e}")
+    st.info("Vérifiez que le dossier 'core' contient bien un fichier '__init__.py' vide.")
+    st.stop()
 
 # Import du rendu UI
 try:
@@ -57,8 +70,6 @@ def render(df):
     # --- 3. SECTION COACHING & STRATÉGIE ---
     with st.container():
         strat_label = get_coaching_strategy(df_clean)
-        
-        # Style dynamique selon la stratégie
         strat_color = "#10b981" if "Optimal" in strat_label else ("#f59e0b" if "Surcharge" in strat_label else "#3b82f6")
         
         st.markdown(f"""
@@ -87,10 +98,9 @@ def render(df):
         st.metric("Charge 7j", f"{int(recent_tss)}", f"{delta_tss:+d} TSS", delta_color="normal")
         st.caption("Tendance vs S-1")
 
-    # --- 4. GRAPHIQUE DE PERFORMANCE (PMC) AVANCÉ ---
+    # --- 4. GRAPHIQUE DE PERFORMANCE (PMC) ---
     st.markdown("### 📈 Analyse de Charge & Volume")
     
-    # Création du graphique avec deux axes Y
     fig = make_subplots(
         rows=2, cols=1, 
         shared_xaxes=True, 
@@ -99,10 +109,8 @@ def render(df):
         specs=[[{"secondary_y": True}], [{"secondary_y": False}]]
     )
 
-    # Zone de forme optimale (TSB entre -10 et -30)
     fig.add_hrect(y0=-30, y1=-10, fillcolor="#10b981", opacity=0.1, line_width=0, row=1, col=1)
 
-    # ATL (Fatigue) - Surface
     fig.add_trace(go.Scatter(
         x=df_clean['date'], y=df_clean['icu_atl'],
         name="Fatigue (ATL)",
@@ -110,14 +118,12 @@ def render(df):
         fill='tozeroy', fillcolor='rgba(168, 85, 247, 0.05)'
     ), row=1, col=1)
 
-    # CTL (Condition) - Ligne épaisse
     fig.add_trace(go.Scatter(
         x=df_clean['date'], y=df_clean['icu_ctl'],
         name="Condition (CTL)",
         line=dict(color='#3b82f6', width=3),
     ), row=1, col=1)
 
-    # TSS Journalier - Barres (Axe secondaire)
     fig.add_trace(go.Bar(
         x=df_clean['date'], y=df_clean['icu_training_load'],
         name="Charge (TSS)",
@@ -125,7 +131,6 @@ def render(df):
         marker_line_width=0
     ), row=1, col=1, secondary_y=True)
 
-    # TSB (Forme) - Courbe en bas
     fig.add_trace(go.Scatter(
         x=df_clean['date'], y=df_clean['icu_ctl'] - df_clean['icu_atl'],
         name="Forme (TSB)",
@@ -133,16 +138,6 @@ def render(df):
         fill='tozeroy', fillcolor='rgba(255, 255, 255, 0.05)'
     ), row=2, col=1)
 
-    # Marqueur de l'objectif (si présent dans le profil)
-    obj_date = prof.get('next_race_date') or prof.get('date_objectif')
-    if obj_date:
-        try:
-            target_dt = pd.to_datetime(str(obj_date))
-            fig.add_vline(x=target_dt, line_dash="dash", line_color="#ef4444", 
-                          annotation_text="OBJECTIF", annotation_position="top left")
-        except: pass
-
-    # Mise en page
     fig.update_layout(
         template="plotly_dark",
         height=600,
@@ -153,9 +148,6 @@ def render(df):
         plot_bgcolor='rgba(0,0,0,0)'
     )
     
-    fig.update_yaxes(title_text="Fitness / Fatigue", row=1, col=1)
-    fig.update_yaxes(title_text="Forme", row=2, col=1)
-    
     st.plotly_chart(fig, use_container_width=True)
 
     # --- 5. ANALYSE IA & PALMARÈS ---
@@ -165,13 +157,9 @@ def render(df):
     with col_ai:
         st.subheader("🤖 Coach IA Ultra")
         feedback = get_ia_coaching_feedback(df_clean)
-        
-        # Boîte de dialogue IA stylisée
         st.markdown(f"""
         <div style="background: #1e293b; padding: 20px; border-radius: 15px; border: 1px solid #334155;">
-            <p style="color: #cbd5e1; font-size: 0.95rem; line-height: 1.6;">
-                {feedback}
-            </p>
+            <p style="color: #cbd5e1; font-size: 0.95rem; line-height: 1.6;">{feedback}</p>
         </div>
         """, unsafe_allow_value=True)
 
@@ -181,11 +169,9 @@ def render(df):
         if raw_bt:
             races = parse_betrail_paste(raw_bt)
             if races:
-                # On transforme en DataFrame pour un joli rendu
-                rdf = pd.DataFrame(races)
-                for i, row in rdf.iterrows():
-                    st.markdown(f"**{row['date']}** - {row['nom']}")
-                    st.caption(f"🏁 {row['resultat']} | 📈 Perf: {row['performance']}")
+                for r in races:
+                    st.markdown(f"**{r['date']}** - {r['nom']}")
+                    st.caption(f"🏁 {r['resultat']} | 📈 Perf: {r['performance']}")
             else:
                 st.info("Format BeTrail non reconnu.")
         else:
