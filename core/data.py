@@ -231,3 +231,14 @@ def parse_betrail_paste(raw_text):
             i += 1
             
     return races
+
+# --- FONCTIONS MANQUANTES (FIX ERREUR IMPORT) ---
+
+def get_nolio_sessions(api_key):
+    """Récupère les sessions depuis Nolio (Placeholder)."""
+    # Pour l'instant, on retourne une liste vide pour éviter l'erreur de cockpit.py
+    return []
+
+def get_betrail_data(username):
+    """Récupère les données publiques Betrail (Placeholder)."""
+    return {"index": 50.0}
