@@ -4,6 +4,7 @@ import time
 from datetime import date
 import os
 import sys
+import requests # Ajouté pour la vérification du mot de passe
 
 # --- 1. CONFIGURATION DES CHEMINS ---
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -46,28 +47,47 @@ st.markdown("""
 
 # --- 4. INITIALISATION FIREBASE ---
 try:
-    db, _ = init_firebase()
+    # On récupère db et aussi la clé API pour l'auth REST
+    db, firebase_config = init_firebase() 
+    API_KEY = st.secrets["firebase"]["api_key"] # Assure-toi d'avoir api_key dans tes secrets
 except Exception as e:
-    st.error(f"Erreur de connexion Firebase : {e}")
+    st.error(f"Erreur de configuration : {e}")
     st.stop()
 
-# --- 5. GESTION DE LA SESSION & AUTH ---
-if "user" not in st.session_state:
-    st.session_state.user = None
+# --- 5. FONCTIONS D'AUTHENTIFICATION RÉELLES ---
+
+def verify_password(email, password):
+    """Vérifie les identifiants via l'API REST de Firebase."""
+    url = f"https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key={API_KEY}"
+    payload = {"email": email, "password": password, "returnSecureToken": True}
+    res = requests.post(url, json=payload)
+    if res.status_code == 200:
+        return res.json() # Contient localId (uid) et idToken
+    return None
 
 def handle_login(email, password):
-    try:
-        # Note: Simulation de vérification. Pour une prod, utilisez Firebase Auth REST API ou Client SDK.
-        user = admin_auth.get_user_by_email(email)
-        st.session_state.user = {"email": email, "uid": user.uid}
+    if not email or not password:
+        st.warning("Veuillez remplir tous les champs.")
+        return False
+        
+    auth_data = verify_password(email, password)
+    if auth_data:
+        st.session_state.user = {
+            "email": email, 
+            "uid": auth_data['localId'],
+            "token": auth_data['idToken']
+        }
         return True
-    except Exception:
-        st.error("Identifiants incorrects ou compte inexistant.")
+    else:
+        st.error("Email ou mot de passe incorrect.")
         return False
 
 def handle_signup(email, password):
     try:
+        # Création du compte dans Firebase Auth
         user = admin_auth.create_user(email=email, password=password)
+        
+        # Initialisation du profil dans Firestore
         default_profile = {
             "email": email,
             "created_at": time.time(),
@@ -78,13 +98,17 @@ def handle_signup(email, password):
             "race_plan": []
         }
         save_user_profile(user.uid, default_profile)
-        st.success("Compte créé avec succès !")
+        st.success("Compte créé ! Vous pouvez maintenant vous connecter.")
         return True
     except Exception as e:
-        st.error(f"Erreur : {str(e)}")
+        st.error(f"Erreur d'inscription : {str(e)}")
         return False
 
-# --- 6. ÉCRAN DE CONNEXION ---
+# --- 6. GESTION DE LA SESSION ---
+if "user" not in st.session_state:
+    st.session_state.user = None
+
+# ÉCRAN DE CONNEXION
 if st.session_state.user is None:
     c1, c2, c3 = st.columns([1, 2, 1])
     with c2:
@@ -95,17 +119,21 @@ if st.session_state.user is None:
             email = st.text_input("Email", key="login_email")
             pwd = st.text_input("Mot de passe", type="password", key="login_pwd")
             if st.button("Se connecter", use_container_width=True):
-                if handle_login(email, pwd): st.rerun()
+                if handle_login(email, pwd): 
+                    st.rerun()
         
         with tab_s:
             new_email = st.text_input("Email", key="reg_email")
             new_pwd = st.text_input("Mot de passe", type="password", key="reg_pwd")
             if st.button("Créer un compte", use_container_width=True):
-                if len(new_pwd) >= 6: handle_signup(new_email, new_pwd)
-                else: st.warning("Le mot de passe doit faire 6 caractères minimum.")
+                if len(new_pwd) >= 6: 
+                    if handle_signup(new_email, new_pwd):
+                        time.sleep(1) # Petit délai pour laisser l'utilisateur voir le succès
+                else: 
+                    st.warning("Le mot de passe doit faire 6 caractères minimum.")
     st.stop()
 
-# --- 7. CHARGEMENT DONNÉES & NAVIGATION ---
+# --- 7. CHARGEMENT DONNÉES & NAVIGATION (Utilisateur connecté) ---
 user_id = st.session_state.user['uid']
 user_profile = load_profile(user_id)
 
@@ -117,7 +145,7 @@ def fetch_fitness(uid, api_key):
 # Sidebar
 with st.sidebar:
     st.title("Menu")
-    st.write(f"Utilisateur : **{st.session_state.user['email']}**")
+    st.write(f"Connecté : **{st.session_state.user['email']}**")
     menu = st.radio(
         "Navigation",
         ["📊 Dashboard", "📅 Entraînement", "🏁 Plan de Course", "🍼 Nutrition", "🏆 Objectifs", "👤 Profil"]
