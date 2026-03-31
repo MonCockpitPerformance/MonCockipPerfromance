@@ -1,122 +1,137 @@
 import datetime
 import streamlit as st
+import numpy as np
 
-# Tentative d'import sécurisée de pandas
+# Import standard de pandas
 try:
     import pandas as pd
 except ImportError:
-    # Fallback pour éviter l'erreur 'pd' not defined
-    class MockPandas:
-        def DataFrame(self, data=None, *args, **kwargs): 
-            return None
-    pd = MockPandas()
+    # Création d'un objet vide sécurisé si pandas manque (rare sur Streamlit Cloud)
+    pd = None
 
-# --- 1. INITIALISATION ET PROFIL ---
+# --- 1. GESTION DU PROFIL ET INITIALISATION ---
 
 def init_firebase():
-    """Initialisation neutralisée pour le mode local/session."""
+    """Initialisation des services de données (simulée pour le mode local)."""
     return None, None
 
 def load_profile(user_id=None):
-    """Charge un profil par défaut dans le st.session_state."""
-    default_profile = {
-        "betrail_index": 50.0,
-        "intervals_id": "",
-        "intervals_api": "",
-        "race_plan": [],
-        "last_sync": datetime.datetime.now().strftime("%Y-%m-%d")
-    }
+    """
+    Charge le profil utilisateur depuis le session_state.
+    Initialise des valeurs par défaut si aucune donnée n'existe.
+    """
     if "user_profile" not in st.session_state:
-        st.session_state.user_profile = default_profile
+        st.session_state.user_profile = {
+            "betrail_index": 50.0,
+            "intervals_id": "",
+            "intervals_api": "",
+            "race_plan": [],
+            "last_sync": datetime.datetime.now().strftime("%Y-%m-%d")
+        }
     return st.session_state.user_profile
 
 def save_user_profile(user_id, profile_data):
-    """Sauvegarde les données dans la session en cours."""
+    """Enregistre les modifications du profil dans la session."""
     st.session_state.user_profile = profile_data
     return True
 
-# --- 2. RÉCUPÉRATION DES DONNÉES (FITNESS & BETRAIL) ---
+# --- 2. RÉCUPÉRATION DES DONNÉES DE PERFORMANCE ---
 
 def get_athlete_fitness(icu_id, icu_api):
     """
-    Simule ou récupère les données de fitness depuis Intervals.icu.
-    Si les IDs sont vides, retourne un DataFrame de démonstration.
+    Récupère les données de fitness (CTL/ATL/TSB) depuis Intervals.icu.
+    Génère des données de démonstration si les identifiants sont absents.
     """
+    if pd is None:
+        return None
+
     if not icu_id or not icu_api:
-        # Données fictives pour que l'app s'affiche même sans API
+        # Génération de données factices pour éviter le crash de l'interface
+        dates = [datetime.date.today() - datetime.timedelta(days=i) for i in range(60, -1, -1)]
         data = {
-            "date": pd.to_datetime([datetime.date.today() - datetime.timedelta(days=i) for i in range(30, -1, -1)]),
-            "icu_ctl": [40 + i*0.5 for i in range(31)],
-            "icu_atl": [50 + i*0.3 for i in range(31)],
-            "icu_tsb": [-10 + (i%5) for i in range(31)]
+            "date": pd.to_datetime(dates),
+            "icu_ctl": np.linspace(30, 55, 61) + np.random.normal(0, 1, 61),
+            "icu_atl": np.linspace(35, 70, 61) + np.random.normal(0, 5, 61),
+            "icu_tsb": np.random.uniform(-15, 5, 61)
         }
-        return pd.DataFrame(data) if not isinstance(pd, MockPandas) else None
+        return pd.DataFrame(data)
     
-    # Logique réelle de fetch (simplifiée pour l'exemple)
+    # Logique réelle de requête API Intervals.icu à insérer ici
     return None
 
 def get_betrail_index(username):
-    """Simule la récupération de l'index BeTrail."""
+    """Simule la récupération de l'index de performance BeTrail."""
     if not username:
         return 50.0
-    # Logique de scraping ou API à implémenter ici
-    return 62.5 
+    # Simulation d'un index pour un utilisateur actif
+    return 64.2
 
-# --- 3. ANALYSE ET CALCULS ---
+# --- 3. ALGORITHMES DE PRÉDICTION ET ZONES ---
 
 def get_training_status(fitness_df):
-    """Analyse l'état de forme actuel via le CTL/TSB."""
+    """Analyse les dernières métriques pour définir l'état de forme."""
     if fitness_df is None or (hasattr(fitness_df, 'empty') and fitness_df.empty):
-        return {"ctl": 0, "tsb": 0, "status": "Données absentes"}
+        return {"ctl": 0, "tsb": 0, "status": "Données non disponibles"}
     
     try:
-        last = fitness_df.iloc[-1]
-        ctl = last.get('icu_ctl', 0)
-        tsb = last.get('icu_tsb', 0)
+        last_row = fitness_df.iloc[-1]
+        ctl = float(last_row.get('icu_ctl', 0))
+        tsb = float(last_row.get('icu_tsb', 0))
         
-        if tsb < -20: status = "Surentraînement"
-        elif tsb < -10: status = "Intensif"
-        elif tsb < 5: status = "Productif"
-        else: status = "Repos / Frais"
+        if tsb < -25: status = "Risque de Fatigue"
+        elif tsb < -10: status = "Entraînement Intensif"
+        elif tsb < 5: status = "Phase Productive"
+        elif tsb < 15: status = "Affûtage / Frais"
+        else: status = "Désentraînement"
         
         return {"ctl": round(ctl, 1), "tsb": round(tsb, 1), "status": status}
     except Exception:
-        return {"ctl": 0, "tsb": 0, "status": "Erreur analyse"}
+        return {"ctl": 0, "tsb": 0, "status": "Erreur de lecture"}
 
 def calculate_race_prediction(km, d_plus, betrail_index):
-    """Estime le temps de course basé sur l'effort-kilomètre."""
+    """
+    Calcule le temps estimé sur une course.
+    Utilise le concept d'effort-kilomètre (100m D+ = 1km plat).
+    """
     idx = float(betrail_index) if betrail_index else 50.0
+    # Formule simplifiée : Effort KM = Distance + (D+ / 100)
     effort_km = float(km) + (float(d_plus) / 100.0)
-    base_speed = (idx / 50.0) * 6.5 # Vitesse de base arbitraire
     
-    time_hours = effort_km / base_speed if base_speed > 0 else 0
+    # Vitesse de référence basée sur l'index (Ex: Index 50 ~ 7km/h d'effort)
+    ref_speed = (idx / 50.0) * 7.5
+    
+    time_hours = effort_km / ref_speed if ref_speed > 0 else 0
+    
     return {
         "hours": time_hours,
-        "effort_km": effort_km,
-        "speed_kmh": float(km) / time_hours if time_hours > 0 else 0
+        "effort_km": round(effort_km, 1),
+        "speed_kmh": round(float(km) / time_hours, 2) if time_hours > 0 else 0
     }
 
 def calculate_pace_zones(betrail_index):
-    """Détermine les zones d'allure d'entraînement."""
+    """Définit les allures de travail basées sur l'index de performance."""
     idx = float(betrail_index) if betrail_index else 50.0
-    v_ref = (idx / 50.0) * 8.0 
+    # Vitesse de base (Zone Endurance)
+    base_v = (idx / 50.0) * 8.5
+    
     return {
-        "Récupération": v_ref * 0.65,
-        "Endurance": v_ref * 0.75,
-        "Tempo": v_ref * 0.85,
-        "Seuil": v_ref * 0.95
+        "Récupération": round(base_v * 0.70, 2),
+        "Endurance Fondamentale": round(base_v * 0.82, 2),
+        "Tempo / Seuil": round(base_v * 0.95, 2),
+        "VMA Trail": round(base_v * 1.15, 2)
     }
 
 def get_coaching_strategy(metrics):
-    """Génère une recommandation de couleur et de conseil."""
+    """Retourne des conseils visuels selon l'état actuel (TSB)."""
     tsb = metrics.get('tsb', 0)
-    if tsb < -15:
-        return {"color": "#ef4444", "advice": "Le risque de blessure est élevé. Levez le pied."}
-    elif tsb < 5:
-        return {"color": "#10b981", "advice": "Charge de travail idéale pour progresser."}
+    if tsb < -20:
+        return {"color": "#ef4444", "advice": "Priorité au repos. Sommeil et hydratation requis."}
+    elif tsb < 0:
+        return {"color": "#f59e0b", "advice": "Charge importante. Continuez mais surveillez les douleurs."}
     else:
-        return {"color": "#3b82f6", "advice": "Vous êtes frais. C'est le moment d'une séance intense."}
+        return {"color": "#10b981", "advice": "Prêt pour une séance de qualité ou une compétition."}
 
 def get_ia_coaching_feedback(df):
-    """Simule un retour d'IA sur l'historique d'entraînement."""
-    return "Votre progression CTL est constante. Attention à ne pas dépasser un pic de fatigue (TSB) trop brutal avant votre objectif."
+    """Analyse tendancielle simplifiée simulant une IA."""
+    if df is None: return "Connectez vos données pour recevoir une analyse."
+    return "Votre charge de travail (CTL) progresse bien. Maintenez cette régularité pour votre prochain objectif."
