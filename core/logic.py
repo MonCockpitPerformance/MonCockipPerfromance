@@ -1,39 +1,83 @@
 import datetime
 import streamlit as st
 import numpy as np
+import firebase_admin
+from firebase_admin import credentials, firestore
 
 # Import standard de pandas
 try:
     import pandas as pd
 except ImportError:
-    # Création d'un objet vide sécurisé si pandas manque (rare sur Streamlit Cloud)
     pd = None
 
-# --- 1. GESTION DU PROFIL ET INITIALISATION ---
+# --- 1. GESTION DU PROFIL ET INITIALISATION FIREBASE ---
 
 def init_firebase():
-    """Initialisation des services de données (simulée pour le mode local)."""
-    return None, None
+    """Initialise la connexion Firestore en utilisant les secrets Streamlit."""
+    if not firebase_admin._apps:
+        try:
+            # On récupère le dictionnaire depuis les secrets
+            creds_dict = dict(st.secrets["firebase_service_account"])
+            # Correction des sauts de ligne pour la clé privée
+            creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
+            
+            cred = credentials.Certificate(creds_dict)
+            firebase_admin.initialize_app(cred)
+        except Exception as e:
+            st.error(f"Erreur d'initialisation Firebase : {e}")
+            return None, None
 
-def load_profile(user_id=None):
-    """
-    Charge le profil utilisateur depuis le session_state.
-    Initialise des valeurs par défaut si aucune donnée n'existe.
-    """
-    if "user_profile" not in st.session_state:
-        st.session_state.user_profile = {
-            "betrail_index": 50.0,
-            "intervals_id": "",
-            "intervals_api": "",
-            "race_plan": [],
-            "last_sync": datetime.datetime.now().strftime("%Y-%m-%d")
-        }
-    return st.session_state.user_profile
+    db = firestore.client()
+    # On retourne aussi la config firebase (contenant l'API Key) pour cockpit.py
+    return db, st.secrets.get("firebase", {})
+
+def load_profile(user_id):
+    """Charge le profil utilisateur depuis Firestore ou crée un défaut."""
+    if not user_id:
+        return {}
+        
+    db, _ = init_firebase()
+    if not db:
+        return {}
+
+    try:
+        # Chemin strict selon la règle de stockage : /artifacts/{appId}/users/{userId}/{collectionName}
+        app_id = "cockpit-perf-v2"
+        doc_ref = db.collection("artifacts").document(app_id).collection("users").document(user_id).collection("profile").document("settings")
+        doc = doc_ref.get()
+        
+        if doc.exists:
+            return doc.to_dict()
+        else:
+            # Profil par défaut si rien n'existe
+            return {
+                "betrail_index": 50.0,
+                "intervals_id": "",
+                "intervals_api": "",
+                "race_plan": [],
+                "last_sync": datetime.datetime.now().strftime("%Y-%m-%d")
+            }
+    except Exception as e:
+        st.error(f"Erreur chargement profil : {e}")
+        return {}
 
 def save_user_profile(user_id, profile_data):
-    """Enregistre les modifications du profil dans la session."""
-    st.session_state.user_profile = profile_data
-    return True
+    """Enregistre les modifications du profil dans Firestore."""
+    if not user_id:
+        return False
+        
+    db, _ = init_firebase()
+    if not db:
+        return False
+
+    try:
+        app_id = "cockpit-perf-v2"
+        doc_ref = db.collection("artifacts").document(app_id).collection("users").document(user_id).collection("profile").document("settings")
+        doc_ref.set(profile_data, merge=True)
+        return True
+    except Exception as e:
+        st.error(f"Erreur sauvegarde profil : {e}")
+        return False
 
 # --- 2. RÉCUPÉRATION DES DONNÉES DE PERFORMANCE ---
 
@@ -56,14 +100,13 @@ def get_athlete_fitness(icu_id, icu_api):
         }
         return pd.DataFrame(data)
     
-    # Logique réelle de requête API Intervals.icu à insérer ici
+    # Logique réelle de requête API Intervals.icu (à implémenter avec requests)
     return None
 
 def get_betrail_index(username):
     """Simule la récupération de l'index de performance BeTrail."""
     if not username:
         return 50.0
-    # Simulation d'un index pour un utilisateur actif
     return 64.2
 
 # --- 3. ALGORITHMES DE PRÉDICTION ET ZONES ---
@@ -89,17 +132,10 @@ def get_training_status(fitness_df):
         return {"ctl": 0, "tsb": 0, "status": "Erreur de lecture"}
 
 def calculate_race_prediction(km, d_plus, betrail_index):
-    """
-    Calcule le temps estimé sur une course.
-    Utilise le concept d'effort-kilomètre (100m D+ = 1km plat).
-    """
+    """Calcule le temps estimé sur une course (100m D+ = 1km plat)."""
     idx = float(betrail_index) if betrail_index else 50.0
-    # Formule simplifiée : Effort KM = Distance + (D+ / 100)
     effort_km = float(km) + (float(d_plus) / 100.0)
-    
-    # Vitesse de référence basée sur l'index (Ex: Index 50 ~ 7km/h d'effort)
     ref_speed = (idx / 50.0) * 7.5
-    
     time_hours = effort_km / ref_speed if ref_speed > 0 else 0
     
     return {
@@ -111,7 +147,6 @@ def calculate_race_prediction(km, d_plus, betrail_index):
 def calculate_pace_zones(betrail_index):
     """Définit les allures de travail basées sur l'index de performance."""
     idx = float(betrail_index) if betrail_index else 50.0
-    # Vitesse de base (Zone Endurance)
     base_v = (idx / 50.0) * 8.5
     
     return {
@@ -134,4 +169,4 @@ def get_coaching_strategy(metrics):
 def get_ia_coaching_feedback(df):
     """Analyse tendancielle simplifiée simulant une IA."""
     if df is None: return "Connectez vos données pour recevoir une analyse."
-    return "Votre charge de travail (CTL) progresse bien. Maintenez cette régularité pour votre prochain objectif."
+    return "Votre charge de travail (CTL) progresse bien. Maintenez cette régularité."
