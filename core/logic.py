@@ -25,7 +25,7 @@ def init_firebase():
             fb_conf = st.secrets[SECRET_KEY]
             creds_dict = dict(fb_conf)
             
-            # Nettoyage de la clé privée
+            # Nettoyage et formatage de la clé privée
             raw_key = creds_dict.get("private_key", "").strip()
             if raw_key.startswith('"') and raw_key.endswith('"'):
                 raw_key = raw_key[1:-1]
@@ -38,25 +38,26 @@ def init_firebase():
             return None, None
     
     try:
-        return firestore.client(), "cockpit-perf-v2"
+        # L'ID de l'application pour le chemin Firestore
+        app_id = "cockpit-perf-v2"
+        return firestore.client(), app_id
     except:
         return None, None
 
 def load_profile(user_id):
-    """Charge le profil utilisateur depuis Firestore."""
+    """Charge le profil utilisateur depuis Firestore avec le chemin strict requis."""
     if not user_id:
         return {}
     db, app_id = init_firebase()
     if not db:
         return {}
     try:
-        # Respect du chemin de collection strict
+        # RÈGLE : /artifacts/{appId}/users/{userId}/{collectionName}
         doc_ref = db.collection("artifacts").document(app_id).collection("users").document(user_id).collection("profile").document("settings")
         doc = doc_ref.get()
         if doc.exists:
             return doc.to_dict()
         
-        # Valeurs par défaut si le document n'existe pas
         return {
             "betrail_index": 50.0,
             "intervals_id": "",
@@ -65,8 +66,7 @@ def load_profile(user_id):
             "last_sync": datetime.datetime.now().strftime("%Y-%m-%d")
         }
     except Exception as e:
-        st.error(f"Erreur chargement profil : {e}")
-        return {}
+        return {"error": str(e)}
 
 def save_user_profile(user_id, profile_data):
     """Enregistre les modifications du profil."""
@@ -77,34 +77,13 @@ def save_user_profile(user_id, profile_data):
         doc_ref = db.collection("artifacts").document(app_id).collection("users").document(user_id).collection("profile").document("settings")
         doc_ref.set(profile_data, merge=True)
         return True
-    except Exception as e:
-        st.error(f"Erreur sauvegarde profil : {e}")
+    except Exception:
         return False
 
-# --- 2. RÉCUPÉRATION DES DONNÉES DE PERFORMANCE ---
-
-def get_athlete_fitness(icu_id, icu_api):
-    """Simule ou récupère les données fitness si les IDs sont absents."""
-    if pd is None: return None
-    # Si pas d'identifiants, on génère des données de simulation pour la démo
-    if not icu_id or not icu_api:
-        dates = [datetime.date.today() - datetime.timedelta(days=i) for i in range(60, -1, -1)]
-        data = {
-            "date": pd.to_datetime(dates),
-            "icu_ctl": np.linspace(30, 55, 61) + np.random.normal(0, 1, 61),
-            "icu_atl": np.linspace(35, 70, 61) + np.random.normal(0, 5, 61),
-            "icu_tsb": np.random.uniform(-15, 5, 61)
-        }
-        return pd.DataFrame(data)
-    
-    # Note: La vraie récupération est gérée dans data.py via get_athlete_fitness
-    # Cette fonction ici peut servir de fallback ou de wrapper
-    return None
-
-# --- 3. ALGORITHMES DE CALCUL ---
+# --- 2. ALGORITHMES DE CALCUL ---
 
 def get_training_status(fitness_df):
-    """Analyse l'état de forme actuel basé sur les métriques ICU."""
+    """Analyse l'état de forme actuel."""
     if fitness_df is None or (hasattr(fitness_df, 'empty') and fitness_df.empty):
         return {"ctl": 0, "tsb": 0, "status": "Données non disponibles"}
     
@@ -113,7 +92,7 @@ def get_training_status(fitness_df):
         ctl = float(last_row.get('icu_ctl', 0))
         tsb = float(last_row.get('icu_tsb', 0))
         
-        if tsb < -25: status = "🚨 Risque de Surentraînement"
+        if tsb < -25: status = "🚨 Risque de Fatigue"
         elif tsb < -10: status = "🔥 Entraînement Intensif"
         elif tsb < 5: status = "📈 Phase Productive"
         elif tsb < 15: status = "✨ Affûtage / Frais"
@@ -124,79 +103,56 @@ def get_training_status(fitness_df):
         return {"ctl": 0, "tsb": 0, "status": "Erreur de calcul"}
 
 def calculate_race_prediction(km, d_plus, betrail_index):
-    """Prédit le temps de course basé sur l'indice de performance."""
+    """Prédit le temps de course."""
     idx = float(betrail_index or 50.0)
     effort_km = float(km) + (float(d_plus) / 100.0)
-    # Formule simplifiée : un indice 50 correspond à environ 7.5 km-effort/h
     ref_speed = (idx / 50.0) * 7.5
     time_h = effort_km / ref_speed if ref_speed > 0 else 0
-    
     return {
         "hours": time_h, 
         "effort_km": round(effort_km, 1), 
         "speed_kmh": round(float(km)/time_h, 2) if time_h > 0 else 0
     }
 
-def calculate_pace_zones(betrail_index):
-    """Définit les zones d'entraînement basées sur l'indice Betrail."""
-    idx = float(betrail_index or 50.0)
-    base_v = (idx / 50.0) * 8.5 # Vitesse de référence en km/h
-    return {
-        "Récupération": round(base_v * 0.70, 2),
-        "Endurance Fondamentale": round(base_v * 0.82, 2),
-        "Tempo / Seuil": round(base_v * 0.95, 2),
-        "VMA Trail": round(base_v * 1.15, 2)
-    }
-
-def get_coaching_strategy(metrics):
-    """Définit une stratégie visuelle selon le TSB."""
-    tsb = metrics.get('tsb', 0)
-    if tsb < -20: return {"color": "#ef4444", "advice": "Priorité absolue au repos et à la récupération."}
-    if tsb < 0: return {"color": "#f59e0b", "advice": "Charge de travail importante, maintenez une bonne hygiène."}
-    return {"color": "#10b981", "advice": "L'organisme est prêt pour des séances de haute intensité."}
-
-# --- 4. FONCTION IA (GEMINI API) ---
+# --- 3. FONCTION IA (GEMINI API) ---
 
 def get_ai_response(user_query, athlete_context, system_prompt=None):
-    """Appelle l'API Gemini avec gestion des erreurs et retries."""
-    api_key = "" # Fourni par l'environnement au runtime
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key={api_key}"
+    """
+    Appelle l'API Gemini. 
+    IMPORTANT: La clé API doit rester vide (""), l'environnement l'injecte.
+    """
+    api_key = "" 
+    model_name = "gemini-2.5-flash-preview-09-2025"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
     
     if not system_prompt:
-        system_prompt = "Tu es un coach expert en Trail Running. Ton rôle est d'analyser les données de charge (CTL, ATL, TSB) et de donner des conseils précis, motivants et sécuritaires."
+        system_prompt = "Tu es un coach expert en Trail Running. Analyse les données de l'athlète et réponds à ses questions avec précision et empathie."
 
     payload = {
-        "contents": [{"parts": [{"text": f"Données athlète: {athlete_context}\n\nQuestion de l'athlète: {user_query}"}]}],
+        "contents": [{"parts": [{"text": f"Contexte de l'athlète: {athlete_context}\nQuestion: {user_query}"}]}],
         "systemInstruction": {"parts": [{"text": system_prompt}]}
     }
 
-    # Exponential Backoff Strategy
+    # Stratégie de retry (Exponential Backoff) : 1s, 2s, 4s, 8s, 16s
     delays = [1, 2, 4, 8, 16]
-    for i, delay in enumerate(delays):
+    for delay in delays:
         try:
-            res = requests.post(url, json=payload, timeout=20)
-            if res.status_code == 200:
-                result = res.json()
-                return result['candidates'][0]['content']['parts'][0]['text']
-            elif res.status_code == 429: # Too Many Requests
+            response = requests.post(url, json=payload, timeout=30)
+            if response.status_code == 200:
+                data = response.json()
+                return data['candidates'][0]['content']['parts'][0]['text']
+            elif response.status_code == 429: # Rate limit
                 time.sleep(delay)
                 continue
             else:
-                return f"Désolé, le service de coaching est temporairement indisponible (Code: {res.status_code})."
+                return f"Le coach n'est pas disponible (Erreur {response.status_code})."
         except Exception:
             time.sleep(delay)
-            if i == len(delays) - 1:
-                return "Connexion au coach IA impossible. Vérifiez votre connexion."
-    
-    return "Le coach IA ne semble pas pouvoir répondre pour le moment."
+            
+    return "L'IA de coaching ne répond pas. Vérifiez votre connexion."
 
 def get_ia_coaching_feedback(df):
-    """Wrapper simplifié pour un feedback rapide."""
-    if df is None or (hasattr(df, 'empty') and df.empty): 
-        return "Aucune donnée de performance disponible pour analyse."
-    st_val = get_training_status(df)
-    return f"Analyse actuelle : Votre statut est '{st_val['status']}'. Votre niveau de forme (CTL) est de {st_val['ctl']}."
-
-def get_betrail_index(username):
-    """Simule la récupération d'un indice Betrail."""
-    return 64.2 if username else 50.0
+    """Feedback rapide pour l'affichage."""
+    if df is None: return "En attente de données..."
+    status = get_training_status(df)
+    return f"{status['status']} (Charge actuelle: {status['ctl']})"
