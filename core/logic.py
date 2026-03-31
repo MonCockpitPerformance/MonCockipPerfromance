@@ -1,23 +1,24 @@
 import datetime
-# Tentative d'import sécurisée pour éviter le blocage
+import streamlit as st
+
+# Tentative d'import sécurisée de pandas
 try:
     import pandas as pd
 except ImportError:
-    # Création d'un faux objet pd pour éviter l'erreur 'pd' not defined
+    # Fallback pour éviter l'erreur 'pd' not defined
     class MockPandas:
-        def DataFrame(self, *args, **kwargs): return None
+        def DataFrame(self, data=None, *args, **kwargs): 
+            return None
     pd = MockPandas()
 
-import streamlit as st
-
-# --- 1. GESTION DES ERREURS D'INITIALISATION ---
+# --- 1. INITIALISATION ET PROFIL ---
 
 def init_firebase():
-    """Initialisation neutralisée pour éviter le blocage au démarrage."""
+    """Initialisation neutralisée pour le mode local/session."""
     return None, None
 
 def load_profile(user_id=None):
-    """Charge un profil par défaut en mémoire vive (Session State)."""
+    """Charge un profil par défaut dans le st.session_state."""
     default_profile = {
         "betrail_index": 50.0,
         "intervals_id": "",
@@ -30,19 +31,63 @@ def load_profile(user_id=None):
     return st.session_state.user_profile
 
 def save_user_profile(user_id, profile_data):
-    """Sauvegarde locale temporaire."""
+    """Sauvegarde les données dans la session en cours."""
     st.session_state.user_profile = profile_data
     return True
 
-# --- 2. CALCULS DE PERFORMANCE ---
+# --- 2. RÉCUPÉRATION DES DONNÉES (FITNESS & BETRAIL) ---
+
+def get_athlete_fitness(icu_id, icu_api):
+    """
+    Simule ou récupère les données de fitness depuis Intervals.icu.
+    Si les IDs sont vides, retourne un DataFrame de démonstration.
+    """
+    if not icu_id or not icu_api:
+        # Données fictives pour que l'app s'affiche même sans API
+        data = {
+            "date": pd.to_datetime([datetime.date.today() - datetime.timedelta(days=i) for i in range(30, -1, -1)]),
+            "icu_ctl": [40 + i*0.5 for i in range(31)],
+            "icu_atl": [50 + i*0.3 for i in range(31)],
+            "icu_tsb": [-10 + (i%5) for i in range(31)]
+        }
+        return pd.DataFrame(data) if not isinstance(pd, MockPandas) else None
+    
+    # Logique réelle de fetch (simplifiée pour l'exemple)
+    return None
+
+def get_betrail_index(username):
+    """Simule la récupération de l'index BeTrail."""
+    if not username:
+        return 50.0
+    # Logique de scraping ou API à implémenter ici
+    return 62.5 
+
+# --- 3. ANALYSE ET CALCULS ---
+
+def get_training_status(fitness_df):
+    """Analyse l'état de forme actuel via le CTL/TSB."""
+    if fitness_df is None or (hasattr(fitness_df, 'empty') and fitness_df.empty):
+        return {"ctl": 0, "tsb": 0, "status": "Données absentes"}
+    
+    try:
+        last = fitness_df.iloc[-1]
+        ctl = last.get('icu_ctl', 0)
+        tsb = last.get('icu_tsb', 0)
+        
+        if tsb < -20: status = "Surentraînement"
+        elif tsb < -10: status = "Intensif"
+        elif tsb < 5: status = "Productif"
+        else: status = "Repos / Frais"
+        
+        return {"ctl": round(ctl, 1), "tsb": round(tsb, 1), "status": status}
+    except Exception:
+        return {"ctl": 0, "tsb": 0, "status": "Erreur analyse"}
 
 def calculate_race_prediction(km, d_plus, betrail_index):
-    """Estimation simple du temps de course."""
+    """Estime le temps de course basé sur l'effort-kilomètre."""
     idx = float(betrail_index) if betrail_index else 50.0
-    # Effort KM : 100m D+ = 1km plat
     effort_km = float(km) + (float(d_plus) / 100.0)
-    # Vitesse de base (Index 50 = ~6.5 km/h d'effort)
-    base_speed = (idx / 50.0) * 6.5
+    base_speed = (idx / 50.0) * 6.5 # Vitesse de base arbitraire
     
     time_hours = effort_km / base_speed if base_speed > 0 else 0
     return {
@@ -51,28 +96,10 @@ def calculate_race_prediction(km, d_plus, betrail_index):
         "speed_kmh": float(km) / time_hours if time_hours > 0 else 0
     }
 
-def get_training_status(fitness_df):
-    """Analyse simplifiée sans dépendance stricte à Pandas."""
-    if fitness_df is None:
-        return {"ctl": 0, "tsb": 0, "status": "Données absentes"}
-    
-    # Si c'est un DataFrame valide
-    try:
-        if hasattr(fitness_df, 'empty') and not fitness_df.empty:
-            last = fitness_df.iloc[-1]
-            ctl = last.get('icu_ctl', 0)
-            tsb = last.get('icu_tsb', 0)
-            status = "Productif" if -10 < tsb < 5 else "Fatigué"
-            return {"ctl": round(ctl, 1), "tsb": round(tsb, 1), "status": status}
-    except:
-        pass
-        
-    return {"ctl": 0, "tsb": 0, "status": "En attente de synchro"}
-
 def calculate_pace_zones(betrail_index):
-    """Zones d'allure basées sur l'index BeTrail."""
+    """Détermine les zones d'allure d'entraînement."""
     idx = float(betrail_index) if betrail_index else 50.0
-    v_ref = (idx / 50.0) * 7.5 
+    v_ref = (idx / 50.0) * 8.0 
     return {
         "Récupération": v_ref * 0.65,
         "Endurance": v_ref * 0.75,
@@ -80,20 +107,16 @@ def calculate_pace_zones(betrail_index):
         "Seuil": v_ref * 0.95
     }
 
-def ensure_dataframe(data):
-    """Garantit un objet manipulable même si pandas échoue."""
-    try:
-        return pd.DataFrame(data)
-    except:
-        return None
-
 def get_coaching_strategy(metrics):
-    """Conseils de base."""
+    """Génère une recommandation de couleur et de conseil."""
     tsb = metrics.get('tsb', 0)
     if tsb < -15:
-        return {"color": "#ef4444", "advice": "Repos recommandé."}
-    return {"color": "#10b981", "advice": "Entraînement optimal."}
+        return {"color": "#ef4444", "advice": "Le risque de blessure est élevé. Levez le pied."}
+    elif tsb < 5:
+        return {"color": "#10b981", "advice": "Charge de travail idéale pour progresser."}
+    else:
+        return {"color": "#3b82f6", "advice": "Vous êtes frais. C'est le moment d'une séance intense."}
 
 def get_ia_coaching_feedback(df):
-    """Simulation de réponse IA."""
-    return "Analyse en cours... Vos charges d'entraînement sont stables."
+    """Simule un retour d'IA sur l'historique d'entraînement."""
+    return "Votre progression CTL est constante. Attention à ne pas dépasser un pic de fatigue (TSB) trop brutal avant votre objectif."
