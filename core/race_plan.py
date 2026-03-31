@@ -1,5 +1,4 @@
 import streamlit as st
-import pd as pd
 import pandas as pd
 import plotly.graph_objects as go
 from datetime import datetime, timedelta, date
