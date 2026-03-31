@@ -4,7 +4,7 @@ import time
 from datetime import date
 import os
 import sys
-import requests # Ajouté pour la vérification du mot de passe
+import requests
 
 # --- 1. CONFIGURATION DES CHEMINS ---
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -23,7 +23,6 @@ try:
     from firebase_admin import auth as admin_auth
 except ImportError as e:
     st.error(f"❌ Erreur d'importation des modules : {e}")
-    st.info("Vérifiez que la structure des dossiers 'core', 'tabs' et 'views' est correcte.")
     st.stop()
 
 # --- 3. CONFIGURATION DE LA PAGE ---
@@ -47,22 +46,25 @@ st.markdown("""
 
 # --- 4. INITIALISATION FIREBASE ---
 try:
-    # On récupère db et aussi la clé API pour l'auth REST
     db, firebase_config = init_firebase() 
-    API_KEY = st.secrets["firebase"]["api_key"] # Assure-toi d'avoir api_key dans tes secrets
+    # Récupération sécurisée de l'API KEY pour l'auth REST
+    API_KEY = st.secrets["firebase"]["api_key"]
 except Exception as e:
-    st.error(f"Erreur de configuration : {e}")
+    st.error(f"Erreur de configuration Firebase : {e}")
     st.stop()
 
-# --- 5. FONCTIONS D'AUTHENTIFICATION RÉELLES ---
+# --- 5. FONCTIONS D'AUTHENTIFICATION ---
 
 def verify_password(email, password):
     """Vérifie les identifiants via l'API REST de Firebase."""
     url = f"https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key={API_KEY}"
     payload = {"email": email, "password": password, "returnSecureToken": True}
-    res = requests.post(url, json=payload)
-    if res.status_code == 200:
-        return res.json() # Contient localId (uid) et idToken
+    try:
+        res = requests.post(url, json=payload)
+        if res.status_code == 200:
+            return res.json()
+    except Exception:
+        pass
     return None
 
 def handle_login(email, password):
@@ -84,21 +86,23 @@ def handle_login(email, password):
 
 def handle_signup(email, password):
     try:
-        # Création du compte dans Firebase Auth
+        # 1. Création du compte dans Firebase Auth (Admin SDK)
         user = admin_auth.create_user(email=email, password=password)
         
-        # Initialisation du profil dans Firestore
+        # 2. Initialisation du profil par défaut via la logique métier
         default_profile = {
             "email": email,
-            "created_at": time.time(),
+            "betrail_index": 50.0,
             "intervals_id": "",
             "intervals_api": "",
-            "betrail_index": 50.0,
             "weight": 70,
-            "race_plan": []
+            "race_plan": [],
+            "created_at": time.time()
         }
+        # Utilise la fonction de logic.py pour garantir le bon chemin Firestore
         save_user_profile(user.uid, default_profile)
-        st.success("Compte créé ! Vous pouvez maintenant vous connecter.")
+        
+        st.success("Compte créé avec succès !")
         return True
     except Exception as e:
         st.error(f"Erreur d'inscription : {str(e)}")
@@ -108,7 +112,7 @@ def handle_signup(email, password):
 if "user" not in st.session_state:
     st.session_state.user = None
 
-# ÉCRAN DE CONNEXION
+# ÉCRAN DE CONNEXION / INSCRIPTION
 if st.session_state.user is None:
     c1, c2, c3 = st.columns([1, 2, 1])
     with c2:
@@ -128,24 +132,25 @@ if st.session_state.user is None:
             if st.button("Créer un compte", use_container_width=True):
                 if len(new_pwd) >= 6: 
                     if handle_signup(new_email, new_pwd):
-                        time.sleep(1) # Petit délai pour laisser l'utilisateur voir le succès
+                        time.sleep(1)
                 else: 
                     st.warning("Le mot de passe doit faire 6 caractères minimum.")
     st.stop()
 
-# --- 7. CHARGEMENT DONNÉES & NAVIGATION (Utilisateur connecté) ---
+# --- 7. CHARGEMENT DONNÉES & NAVIGATION ---
 user_id = st.session_state.user['uid']
+# On charge le profil depuis Firestore (via logic.py)
 user_profile = load_profile(user_id)
 
 @st.cache_data(ttl=600)
 def fetch_fitness(uid, api_key):
-    if not uid or not api_key: return pd.DataFrame()
+    # Appel de la fonction dans logic.py
     return get_athlete_fitness(uid, api_key)
 
 # Sidebar
 with st.sidebar:
     st.title("Menu")
-    st.write(f"Connecté : **{st.session_state.user['email']}**")
+    st.write(f"Utilisateur : **{st.session_state.user['email']}**")
     menu = st.radio(
         "Navigation",
         ["📊 Dashboard", "📅 Entraînement", "🏁 Plan de Course", "🍼 Nutrition", "🏆 Objectifs", "👤 Profil"]
@@ -155,10 +160,10 @@ with st.sidebar:
         st.session_state.user = None
         st.rerun()
 
-# Données Fitness
+# Données Fitness (Intervals.icu)
 df_fitness = fetch_fitness(
     user_profile.get('intervals_id'), 
-    user_profile.get('intervals_api') or user_profile.get('api_key')
+    user_profile.get('intervals_api')
 )
 
 # --- 8. RENDU DES ONGLETS ---
@@ -176,8 +181,8 @@ try:
     elif menu == "👤 Profil":
         profile_tab.render(user_id, user_profile)
 except Exception as e:
-    st.error(f"Erreur dans l'onglet {menu}")
+    st.error(f"Erreur d'affichage dans l'onglet {menu}")
     st.exception(e)
 
 st.sidebar.markdown("---")
-st.sidebar.caption(f"v2.0.1 | {date.today().year} Performance Lab")
+st.sidebar.caption(f"v2.0.2 | {date.today().year} Performance Lab")
