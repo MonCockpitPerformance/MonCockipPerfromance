@@ -5,12 +5,15 @@ import pandas as pd
 import firebase_admin
 from firebase_admin import credentials, firestore, auth
 import re
-import json
 import xml.etree.ElementTree as ET
 import numpy as np
 from datetime import datetime
 
-# --- UTILITAIRES DE SÉCURITÉ ---
+# --- CONFIGURATION GLOBALE ---
+# Identifiant unique pour le bac à sable Firestore
+APP_ID = "cockpit-perf-v2"
+
+# --- UTILITAIRES ---
 def ensure_dataframe(df_input):
     """Garantit qu'on manipule toujours un DataFrame Pandas valide."""
     if df_input is None:
@@ -24,57 +27,40 @@ def ensure_dataframe(df_input):
 
 # --- INITIALISATION FIREBASE ---
 def init_firebase():
-    """Initialise Firebase Admin SDK avec les secrets Streamlit."""
-    # Nom de la clé tel que défini dans vos secrets
+    """Initialise Firebase avec les secrets Streamlit."""
     SECRET_KEY = "firebase_service_account"
     
     if not firebase_admin._apps:
         try:
             if SECRET_KEY not in st.secrets:
-                st.error(f"❌ La clé '{SECRET_KEY}' est manquante dans les secrets Streamlit.")
                 return None, None
             
             fb_conf = st.secrets[SECRET_KEY]
+            creds_dict = dict(fb_conf)
             
-            # Nettoyage de la clé privée (Gestion des sauts de ligne et des guillemets)
-            raw_key = fb_conf.get("private_key", "").strip()
+            # Nettoyage de la clé privée
+            raw_key = creds_dict.get("private_key", "").strip()
             if raw_key.startswith('"') and raw_key.endswith('"'):
                 raw_key = raw_key[1:-1]
-            private_key = raw_key.replace("\\n", "\n")
-            
-            # Reconstruction du dictionnaire de credentials standard
-            creds_dict = {
-                "type": fb_conf.get("type", "service_account"),
-                "project_id": fb_conf.get("project_id"),
-                "private_key_id": fb_conf.get("private_key_id"),
-                "private_key": private_key,
-                "client_email": fb_conf.get("client_email"),
-                "client_id": fb_conf.get("client_id"),
-                "auth_uri": fb_conf.get("auth_uri", "https://accounts.google.com/o/oauth2/auth"),
-                "token_uri": fb_conf.get("token_uri", "https://oauth2.googleapis.com/token"),
-                "auth_provider_x509_cert_url": fb_conf.get("auth_provider_x509_cert_url", "https://www.googleapis.com/oauth2/v1/certs"),
-                "client_x509_cert_url": fb_conf.get("client_x509_cert_url")
-            }
+            creds_dict["private_key"] = raw_key.replace("\\n", "\n")
             
             cred = credentials.Certificate(creds_dict)
             firebase_admin.initialize_app(cred)
         except Exception as e:
-            st.error(f"❌ Erreur d'initialisation Firebase : {e}")
+            st.error(f"Erreur d'initialisation Firebase : {e}")
             return None, None
             
     try:
         return firestore.client(), auth
-    except Exception as e:
-        st.error(f"❌ Erreur d'accès aux services Firebase : {e}")
+    except:
         return None, None
 
-# --- GESTION DU PROFIL ---
+# --- GESTION DU PROFIL (RÈGLES DE CHEMINS STRICTES) ---
 def load_profile(user_id):
-    """Charge le profil utilisateur depuis la collection 'profiles'."""
-    db, _ = init_firebase()
+    """Charge le profil utilisateur avec le chemin requis par l'infrastructure."""
     default_profile = {
         "intervals_id": "",
-        "api_key": "",
+        "intervals_api": "", # Changé de api_key pour éviter confusion avec Gemini
         "betrail_index": 50.0,
         "weekly_sessions_target": 3,
         "race_plan": [],
@@ -83,49 +69,57 @@ def load_profile(user_id):
         "weight": 70.0
     }
     
-    if not db or not user_id: 
+    if not user_id:
+        return default_profile
+        
+    db, _ = init_firebase()
+    if not db:
         return default_profile
     
     try:
-        doc_ref = db.collection("profiles").document(user_id)
+        # RÈGLE MANDATOIRE : /artifacts/{appId}/users/{userId}/{collectionName}/{docId}
+        doc_ref = db.collection("artifacts").document(APP_ID).collection("users").document(user_id).collection("profile").document("settings")
         doc = doc_ref.get()
+        
         if doc.exists:
             profile = doc.to_dict()
-            # Fusion avec les valeurs par défaut pour éviter les KeyError
-            for key, val in default_profile.items():
-                if key not in profile:
-                    profile[key] = val
-            return profile
+            # Fusion avec les défauts pour la stabilité
+            return {**default_profile, **profile}
+            
     except Exception as e:
-        st.warning(f"⚠️ Note: Chargement du profil par défaut (Erreur: {e})")
+        st.warning(f"Chargement profil par défaut (Firestore non prêt)")
     
     return default_profile
 
 def save_user_profile(user_id, data):
-    """Sauvegarde ou met à jour le profil utilisateur."""
-    db, _ = init_firebase()
-    if not db or not user_id: 
+    """Sauvegarde le profil dans le chemin structuré."""
+    if not user_id:
         return
+    db, _ = init_firebase()
+    if not db:
+        return
+        
     try:
-        doc_ref = db.collection("profiles").document(user_id)
+        doc_ref = db.collection("artifacts").document(APP_ID).collection("users").document(user_id).collection("profile").document("settings")
         doc_ref.set(data, merge=True)
     except Exception as e:
-        st.error(f"❌ Erreur sauvegarde profil : {e}")
+        st.error(f"Erreur sauvegarde profil : {e}")
 
-# Alias pour compatibilité
+# Alias pour compatibilité avec le reste de l'app
 save_profile = save_user_profile
 
 # --- RÉCUPÉRATION INTERVALS.ICU ---
 @st.cache_data(ttl=600)
-def get_athlete_fitness(intervals_id, api_key):
+def get_athlete_fitness(intervals_id, intervals_api):
     """Récupère les données Fitness depuis Intervals.icu."""
-    if not intervals_id or not api_key:
+    if not intervals_id or not intervals_api:
         return pd.DataFrame()
 
     year = datetime.now().year
     url = f"https://intervals.icu/api/v1/athlete/{intervals_id}/activities?oldest={year}-01-01"
     
-    auth_str = f"API_KEY:{api_key}"
+    # Auth Basic pour Intervals.icu
+    auth_str = f"API_KEY:{intervals_api}"
     encoded_auth = base64.b64encode(auth_str.encode()).decode()
     headers = {"Authorization": f"Basic {encoded_auth}"}
 
@@ -137,12 +131,11 @@ def get_athlete_fitness(intervals_id, api_key):
             
             if not df.empty:
                 # Normalisation des dates
-                if 'start_date_local' in df.columns:
-                    df['date'] = pd.to_datetime(df['start_date_local'])
-                elif 'start_date' in df.columns:
-                    df['date'] = pd.to_datetime(df['start_date'])
+                date_col = 'start_date_local' if 'start_date_local' in df.columns else 'start_date'
+                if date_col in df.columns:
+                    df['date'] = pd.to_datetime(df[date_col])
                 
-                # Conversion numérique forcée des métriques ICU
+                # Conversion numérique des métriques
                 metrics = ['icu_ctl', 'icu_atl', 'icu_tsb', 'icu_training_load']
                 for m in metrics:
                     if m in df.columns:
@@ -217,12 +210,11 @@ def parse_betrail_paste(raw_text):
                 nom_course = lines[i-1] if i > 0 else "Course"
                 
                 perf = 0.0
-                # On cherche la performance sur les lignes suivantes
                 for j in range(i, min(i+10, len(lines))):
                     cleaned_val = lines[j].replace('%', '').replace(',', '.').strip()
                     try:
                         val = float(cleaned_val)
-                        if 30 < val < 110: # Range logique de performance BeTrail
+                        if 30 < val < 110:
                             perf = val
                             break
                     except:
@@ -242,12 +234,9 @@ def parse_betrail_paste(raw_text):
             
     return races
 
-# --- FONCTIONS MANQUANTES (PLACEHOLDERS) ---
-
+# --- PLACEHOLDERS ---
 def get_nolio_sessions(api_key):
-    """Récupère les sessions depuis Nolio (Placeholder)."""
     return []
 
 def get_betrail_data(username):
-    """Récupère les données publiques Betrail (Placeholder)."""
     return {"index": 50.0}
