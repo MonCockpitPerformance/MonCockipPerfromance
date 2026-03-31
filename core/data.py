@@ -30,7 +30,7 @@ def init_firebase():
             if "firebase" not in st.secrets:
                 return None, None
             
-            fb_conf = st.secrets["firebase"]
+            fb_conf = st.secrets["firebase_service_account"]
             
             # Nettoyage de la clé privée
             raw_key = fb_conf.get("private_key", "").strip()
