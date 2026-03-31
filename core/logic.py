@@ -1,6 +1,8 @@
 import datetime
 import streamlit as st
 import numpy as np
+import requests
+import time
 import firebase_admin
 from firebase_admin import credentials, firestore
 
@@ -41,7 +43,7 @@ def load_profile(user_id):
         return {}
 
     try:
-        # Chemin strict selon la règle de stockage : /artifacts/{appId}/users/{userId}/{collectionName}
+        # Chemin strict selon la règle de stockage
         app_id = "cockpit-perf-v2"
         doc_ref = db.collection("artifacts").document(app_id).collection("users").document(user_id).collection("profile").document("settings")
         doc = doc_ref.get()
@@ -49,7 +51,6 @@ def load_profile(user_id):
         if doc.exists:
             return doc.to_dict()
         else:
-            # Profil par défaut si rien n'existe
             return {
                 "betrail_index": 50.0,
                 "intervals_id": "",
@@ -82,15 +83,11 @@ def save_user_profile(user_id, profile_data):
 # --- 2. RÉCUPÉRATION DES DONNÉES DE PERFORMANCE ---
 
 def get_athlete_fitness(icu_id, icu_api):
-    """
-    Récupère les données de fitness (CTL/ATL/TSB) depuis Intervals.icu.
-    Génère des données de démonstration si les identifiants sont absents.
-    """
+    """Récupère les données de fitness depuis Intervals.icu ou génère de la démo."""
     if pd is None:
         return None
 
     if not icu_id or not icu_api:
-        # Génération de données factices pour éviter le crash de l'interface
         dates = [datetime.date.today() - datetime.timedelta(days=i) for i in range(60, -1, -1)]
         data = {
             "date": pd.to_datetime(dates),
@@ -100,7 +97,7 @@ def get_athlete_fitness(icu_id, icu_api):
         }
         return pd.DataFrame(data)
     
-    # Logique réelle de requête API Intervals.icu (à implémenter avec requests)
+    # Logique réelle API Intervals.icu peut être ajoutée ici
     return None
 
 def get_betrail_index(username):
@@ -132,7 +129,7 @@ def get_training_status(fitness_df):
         return {"ctl": 0, "tsb": 0, "status": "Erreur de lecture"}
 
 def calculate_race_prediction(km, d_plus, betrail_index):
-    """Calcule le temps estimé sur une course (100m D+ = 1km plat)."""
+    """Calcule le temps estimé sur une course."""
     idx = float(betrail_index) if betrail_index else 50.0
     effort_km = float(km) + (float(d_plus) / 100.0)
     ref_speed = (idx / 50.0) * 7.5
@@ -166,7 +163,51 @@ def get_coaching_strategy(metrics):
     else:
         return {"color": "#10b981", "advice": "Prêt pour une séance de qualité ou une compétition."}
 
+# --- 4. INTELLIGENCE ARTIFICIELLE (GEMINI) ---
+
+def get_ai_response(user_query, athlete_context, system_prompt=None):
+    """
+    Envoie une requête à l'API Gemini 2.5 Flash pour obtenir une analyse.
+    """
+    api_key = "" # Géré par le proxy de l'environnement
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key={api_key}"
+    
+    if system_prompt is None:
+        system_prompt = "Tu es un coach expert en Trail Running. Analyse les données de l'athlète et réponds à sa question avec expertise technique (VMA, CTL, TSB)."
+
+    # Construction du prompt final
+    full_prompt = f"Contexte athlète : {str(athlete_context)}\n\nQuestion de l'athlète : {user_query}"
+    
+    payload = {
+        "contents": [{
+            "parts": [{"text": full_prompt}]
+        }],
+        "systemInstruction": {
+            "parts": [{"text": system_prompt}]
+        }
+    }
+
+    # Exponential Backoff pour la robustesse
+    for i in range(5):
+        try:
+            response = requests.post(url, json=payload, timeout=30)
+            if response.status_code == 200:
+                result = response.json()
+                return result.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', "Erreur de génération.")
+            elif response.status_code == 429:
+                time.sleep(2**i)
+                continue
+            else:
+                return f"Erreur API ({response.status_code})"
+        except Exception as e:
+            time.sleep(2**i)
+            if i == 4: return f"Erreur de connexion : {str(e)}"
+    
+    return "L'IA est momentanément indisponible."
+
+# Alias pour compatibilité si nécessaire
 def get_ia_coaching_feedback(df):
-    """Analyse tendancielle simplifiée simulant une IA."""
-    if df is None: return "Connectez vos données pour recevoir une analyse."
-    return "Votre charge de travail (CTL) progresse bien. Maintenez cette régularité."
+    """Analyse rapide pour le tableau de bord."""
+    if df is None: return "Aucune donnée."
+    status = get_training_status(df)
+    return f"État actuel : {status['status']}. Votre CTL est de {status['ctl']}."
