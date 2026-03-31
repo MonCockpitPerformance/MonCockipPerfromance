@@ -16,31 +16,47 @@ except ImportError:
 
 def init_firebase():
     """Initialise la connexion Firestore en utilisant les secrets Streamlit."""
+    SECRET_KEY = "firebase_service_account"
     if not firebase_admin._apps:
         try:
-            creds_dict = dict(st.secrets["firebase_service_account"])
-            creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
+            if SECRET_KEY not in st.secrets:
+                return None, None
+            
+            fb_conf = st.secrets[SECRET_KEY]
+            creds_dict = dict(fb_conf)
+            
+            # Nettoyage de la clé privée
+            raw_key = creds_dict.get("private_key", "").strip()
+            if raw_key.startswith('"') and raw_key.endswith('"'):
+                raw_key = raw_key[1:-1]
+            creds_dict["private_key"] = raw_key.replace("\\n", "\n")
+            
             cred = credentials.Certificate(creds_dict)
             firebase_admin.initialize_app(cred)
         except Exception as e:
             st.error(f"Erreur d'initialisation Firebase : {e}")
             return None, None
-    db = firestore.client()
-    return db, st.secrets.get("firebase", {})
+    
+    try:
+        return firestore.client(), "cockpit-perf-v2"
+    except:
+        return None, None
 
 def load_profile(user_id):
     """Charge le profil utilisateur depuis Firestore."""
     if not user_id:
         return {}
-    db, _ = init_firebase()
+    db, app_id = init_firebase()
     if not db:
         return {}
     try:
-        app_id = "cockpit-perf-v2"
+        # Respect du chemin de collection strict
         doc_ref = db.collection("artifacts").document(app_id).collection("users").document(user_id).collection("profile").document("settings")
         doc = doc_ref.get()
         if doc.exists:
             return doc.to_dict()
+        
+        # Valeurs par défaut si le document n'existe pas
         return {
             "betrail_index": 50.0,
             "intervals_id": "",
@@ -55,10 +71,9 @@ def load_profile(user_id):
 def save_user_profile(user_id, profile_data):
     """Enregistre les modifications du profil."""
     if not user_id: return False
-    db, _ = init_firebase()
+    db, app_id = init_firebase()
     if not db: return False
     try:
-        app_id = "cockpit-perf-v2"
         doc_ref = db.collection("artifacts").document(app_id).collection("users").document(user_id).collection("profile").document("settings")
         doc_ref.set(profile_data, merge=True)
         return True
@@ -69,8 +84,9 @@ def save_user_profile(user_id, profile_data):
 # --- 2. RÉCUPÉRATION DES DONNÉES DE PERFORMANCE ---
 
 def get_athlete_fitness(icu_id, icu_api):
-    """Simule ou récupère les données fitness."""
+    """Simule ou récupère les données fitness si les IDs sont absents."""
     if pd is None: return None
+    # Si pas d'identifiants, on génère des données de simulation pour la démo
     if not icu_id or not icu_api:
         dates = [datetime.date.today() - datetime.timedelta(days=i) for i in range(60, -1, -1)]
         data = {
@@ -80,33 +96,51 @@ def get_athlete_fitness(icu_id, icu_api):
             "icu_tsb": np.random.uniform(-15, 5, 61)
         }
         return pd.DataFrame(data)
+    
+    # Note: La vraie récupération est gérée dans data.py via get_athlete_fitness
+    # Cette fonction ici peut servir de fallback ou de wrapper
     return None
 
 # --- 3. ALGORITHMES DE CALCUL ---
 
 def get_training_status(fitness_df):
-    """Analyse l'état de forme actuel."""
+    """Analyse l'état de forme actuel basé sur les métriques ICU."""
     if fitness_df is None or (hasattr(fitness_df, 'empty') and fitness_df.empty):
         return {"ctl": 0, "tsb": 0, "status": "Données non disponibles"}
-    last_row = fitness_df.iloc[-1]
-    ctl, tsb = float(last_row.get('icu_ctl', 0)), float(last_row.get('icu_tsb', 0))
-    if tsb < -25: status = "Risque de Fatigue"
-    elif tsb < -10: status = "Entraînement Intensif"
-    elif tsb < 5: status = "Phase Productive"
-    elif tsb < 15: status = "Affûtage / Frais"
-    else: status = "Désentraînement"
-    return {"ctl": round(ctl, 1), "tsb": round(tsb, 1), "status": status}
+    
+    try:
+        last_row = fitness_df.iloc[-1]
+        ctl = float(last_row.get('icu_ctl', 0))
+        tsb = float(last_row.get('icu_tsb', 0))
+        
+        if tsb < -25: status = "🚨 Risque de Surentraînement"
+        elif tsb < -10: status = "🔥 Entraînement Intensif"
+        elif tsb < 5: status = "📈 Phase Productive"
+        elif tsb < 15: status = "✨ Affûtage / Frais"
+        else: status = "💤 Désentraînement"
+        
+        return {"ctl": round(ctl, 1), "tsb": round(tsb, 1), "status": status}
+    except:
+        return {"ctl": 0, "tsb": 0, "status": "Erreur de calcul"}
 
 def calculate_race_prediction(km, d_plus, betrail_index):
+    """Prédit le temps de course basé sur l'indice de performance."""
     idx = float(betrail_index or 50.0)
     effort_km = float(km) + (float(d_plus) / 100.0)
+    # Formule simplifiée : un indice 50 correspond à environ 7.5 km-effort/h
     ref_speed = (idx / 50.0) * 7.5
     time_h = effort_km / ref_speed if ref_speed > 0 else 0
-    return {"hours": time_h, "effort_km": round(effort_km, 1), "speed_kmh": round(float(km)/time_h, 2) if time_h > 0 else 0}
+    
+    return {
+        "hours": time_h, 
+        "effort_km": round(effort_km, 1), 
+        "speed_kmh": round(float(km)/time_h, 2) if time_h > 0 else 0
+    }
 
 def calculate_pace_zones(betrail_index):
+    """Définit les zones d'entraînement basées sur l'indice Betrail."""
     idx = float(betrail_index or 50.0)
-    base_v = (idx / 50.0) * 8.5
+    base_v = (idx / 50.0) * 8.5 # Vitesse de référence en km/h
     return {
         "Récupération": round(base_v * 0.70, 2),
         "Endurance Fondamentale": round(base_v * 0.82, 2),
@@ -115,47 +149,54 @@ def calculate_pace_zones(betrail_index):
     }
 
 def get_coaching_strategy(metrics):
+    """Définit une stratégie visuelle selon le TSB."""
     tsb = metrics.get('tsb', 0)
-    if tsb < -20: return {"color": "#ef4444", "advice": "Priorité au repos."}
-    if tsb < 0: return {"color": "#f59e0b", "advice": "Charge importante."}
-    return {"color": "#10b981", "advice": "Prêt pour l'intensité."}
+    if tsb < -20: return {"color": "#ef4444", "advice": "Priorité absolue au repos et à la récupération."}
+    if tsb < 0: return {"color": "#f59e0b", "advice": "Charge de travail importante, maintenez une bonne hygiène."}
+    return {"color": "#10b981", "advice": "L'organisme est prêt pour des séances de haute intensité."}
 
-# --- 4. FONCTION IA (CRITIQUE POUR L'IMPORT) ---
+# --- 4. FONCTION IA (GEMINI API) ---
 
 def get_ai_response(user_query, athlete_context, system_prompt=None):
-    """
-    Fonction appelée par cockpit.py pour l'analyse IA.
-    """
-    api_key = "" # Fourni par l'environnement
+    """Appelle l'API Gemini avec gestion des erreurs et retries."""
+    api_key = "" # Fourni par l'environnement au runtime
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key={api_key}"
     
     if not system_prompt:
-        system_prompt = "Tu es un coach expert en Trail Running. Analyse les données (CTL, TSB) et conseille l'athlète."
+        system_prompt = "Tu es un coach expert en Trail Running. Ton rôle est d'analyser les données de charge (CTL, ATL, TSB) et de donner des conseils précis, motivants et sécuritaires."
 
     payload = {
-        "contents": [{"parts": [{"text": f"Context: {athlete_context}\nQuery: {user_query}"}]}],
+        "contents": [{"parts": [{"text": f"Données athlète: {athlete_context}\n\nQuestion de l'athlète: {user_query}"}]}],
         "systemInstruction": {"parts": [{"text": system_prompt}]}
     }
 
-    # Tentatives avec exponential backoff
-    for i in range(5):
+    # Exponential Backoff Strategy
+    delays = [1, 2, 4, 8, 16]
+    for i, delay in enumerate(delays):
         try:
-            res = requests.post(url, json=payload, timeout=15)
+            res = requests.post(url, json=payload, timeout=20)
             if res.status_code == 200:
-                return res.json()['candidates'][0]['content']['parts'][0]['text']
-            elif res.status_code == 429:
-                time.sleep(2**i)
+                result = res.json()
+                return result['candidates'][0]['content']['parts'][0]['text']
+            elif res.status_code == 429: # Too Many Requests
+                time.sleep(delay)
                 continue
-            break
-        except:
-            time.sleep(2**i)
-    return "L'IA ne répond pas pour le moment."
+            else:
+                return f"Désolé, le service de coaching est temporairement indisponible (Code: {res.status_code})."
+        except Exception:
+            time.sleep(delay)
+            if i == len(delays) - 1:
+                return "Connexion au coach IA impossible. Vérifiez votre connexion."
+    
+    return "Le coach IA ne semble pas pouvoir répondre pour le moment."
 
-# Alias pour compatibilité descendante
 def get_ia_coaching_feedback(df):
-    if df is None: return "Pas de données."
+    """Wrapper simplifié pour un feedback rapide."""
+    if df is None or (hasattr(df, 'empty') and df.empty): 
+        return "Aucune donnée de performance disponible pour analyse."
     st_val = get_training_status(df)
-    return f"Statut: {st_val['status']} (CTL: {st_val['ctl']})"
+    return f"Analyse actuelle : Votre statut est '{st_val['status']}'. Votre niveau de forme (CTL) est de {st_val['ctl']}."
 
 def get_betrail_index(username):
+    """Simule la récupération d'un indice Betrail."""
     return 64.2 if username else 50.0
