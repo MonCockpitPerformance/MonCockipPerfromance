@@ -25,39 +25,47 @@ def ensure_dataframe(df_input):
 # --- INITIALISATION FIREBASE ---
 def init_firebase():
     """Initialise Firebase Admin SDK avec les secrets Streamlit."""
+    # Nom de la clé tel que défini dans vos secrets
+    SECRET_KEY = "firebase_service_account"
+    
     if not firebase_admin._apps:
         try:
-            if "firebase" not in st.secrets:
+            if SECRET_KEY not in st.secrets:
+                st.error(f"❌ La clé '{SECRET_KEY}' est manquante dans les secrets Streamlit.")
                 return None, None
             
-            fb_conf = st.secrets["firebase_service_account"]
+            fb_conf = st.secrets[SECRET_KEY]
             
-            # Nettoyage de la clé privée
+            # Nettoyage de la clé privée (Gestion des sauts de ligne et des guillemets)
             raw_key = fb_conf.get("private_key", "").strip()
             if raw_key.startswith('"') and raw_key.endswith('"'):
                 raw_key = raw_key[1:-1]
             private_key = raw_key.replace("\\n", "\n")
             
+            # Reconstruction du dictionnaire de credentials standard
             creds_dict = {
-                "type": fb_conf["type"],
-                "project_id": fb_conf["project_id"],
-                "private_key_id": fb_conf["private_key_id"],
+                "type": fb_conf.get("type", "service_account"),
+                "project_id": fb_conf.get("project_id"),
+                "private_key_id": fb_conf.get("private_key_id"),
                 "private_key": private_key,
-                "client_email": fb_conf["client_email"],
-                "client_id": fb_conf["client_id"],
-                "auth_uri": fb_conf["auth_uri"],
-                "token_uri": fb_conf["token_uri"],
-                "auth_provider_x509_cert_url": fb_conf["auth_provider_x509_cert_url"],
-                "client_x509_cert_url": fb_conf["client_x509_cert_url"]
+                "client_email": fb_conf.get("client_email"),
+                "client_id": fb_conf.get("client_id"),
+                "auth_uri": fb_conf.get("auth_uri", "https://accounts.google.com/o/oauth2/auth"),
+                "token_uri": fb_conf.get("token_uri", "https://oauth2.googleapis.com/token"),
+                "auth_provider_x509_cert_url": fb_conf.get("auth_provider_x509_cert_url", "https://www.googleapis.com/oauth2/v1/certs"),
+                "client_x509_cert_url": fb_conf.get("client_x509_cert_url")
             }
+            
             cred = credentials.Certificate(creds_dict)
             firebase_admin.initialize_app(cred)
         except Exception as e:
-            st.error(f"Erreur d'initialisation Firebase : {e}")
+            st.error(f"❌ Erreur d'initialisation Firebase : {e}")
             return None, None
+            
     try:
         return firestore.client(), auth
-    except:
+    except Exception as e:
+        st.error(f"❌ Erreur d'accès aux services Firebase : {e}")
         return None, None
 
 # --- GESTION DU PROFIL ---
@@ -75,7 +83,7 @@ def load_profile(user_id):
         "weight": 70.0
     }
     
-    if not db: 
+    if not db or not user_id: 
         return default_profile
     
     try:
@@ -83,26 +91,28 @@ def load_profile(user_id):
         doc = doc_ref.get()
         if doc.exists:
             profile = doc.to_dict()
-            # Fusion avec les valeurs par défaut
+            # Fusion avec les valeurs par défaut pour éviter les KeyError
             for key, val in default_profile.items():
                 if key not in profile:
                     profile[key] = val
             return profile
     except Exception as e:
-        st.warning(f"Note: Chargement du profil par défaut (Erreur: {e})")
+        st.warning(f"⚠️ Note: Chargement du profil par défaut (Erreur: {e})")
     
     return default_profile
 
 def save_user_profile(user_id, data):
     """Sauvegarde ou met à jour le profil utilisateur."""
     db, _ = init_firebase()
-    if not db: return
+    if not db or not user_id: 
+        return
     try:
         doc_ref = db.collection("profiles").document(user_id)
         doc_ref.set(data, merge=True)
     except Exception as e:
-        st.error(f"Erreur sauvegarde profil : {e}")
+        st.error(f"❌ Erreur sauvegarde profil : {e}")
 
+# Alias pour compatibilité
 save_profile = save_user_profile
 
 # --- RÉCUPÉRATION INTERVALS.ICU ---
@@ -232,11 +242,10 @@ def parse_betrail_paste(raw_text):
             
     return races
 
-# --- FONCTIONS MANQUANTES (FIX ERREUR IMPORT) ---
+# --- FONCTIONS MANQUANTES (PLACEHOLDERS) ---
 
 def get_nolio_sessions(api_key):
     """Récupère les sessions depuis Nolio (Placeholder)."""
-    # Pour l'instant, on retourne une liste vide pour éviter l'erreur de cockpit.py
     return []
 
 def get_betrail_data(username):
