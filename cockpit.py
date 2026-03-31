@@ -48,7 +48,7 @@ st.markdown("""
 try:
     db, firebase_config = init_firebase() 
     # Récupération sécurisée de l'API KEY pour l'auth REST
-    API_KEY = st.secrets["firebase"]["api_key"]
+    API_KEY = st.secrets["firebase_service_account"]["api_key"]
 except Exception as e:
     st.error(f"Erreur de configuration Firebase : {e}")
     st.stop()
