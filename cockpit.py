@@ -13,7 +13,17 @@ if current_dir not in sys.path:
 
 # --- 2. IMPORTS DES MODULES LOCAUX ---
 try:
-    from core.logic import init_firebase, load_profile, get_athlete_fitness, save_user_profile
+    # Les fonctions de calcul pur (logique métier)
+    from core.logic import calculate_fitness_forecast, predict_race_performance
+    
+    # Les fonctions de données et Firebase (C'est ici qu'était l'erreur)
+    from core.data import (
+        init_firebase, 
+        load_profile, 
+        get_athlete_fitness, 
+        save_user_profile
+    )
+    
     import core.race_plan as race_plan
     import core.nutrition_plan as nutrition_plan
     import tabs.dashboard as dashboard
@@ -21,8 +31,10 @@ try:
     import tabs.profile_tab as profile_tab
     import tabs.objectives as objectives_tab
     from firebase_admin import auth as admin_auth
+    
 except ImportError as e:
     st.error(f"❌ Erreur d'importation des modules : {e}")
+    st.info("Note : Vérifiez que get_athlete_fitness est bien dans core/data.py et non core/logic.py")
     st.stop()
 
 # --- 3. CONFIGURATION DE LA PAGE ---
@@ -54,9 +66,7 @@ except Exception as e:
     st.stop()
 
 # --- 5. FONCTIONS D'AUTHENTIFICATION ---
-
 def verify_password(email, password):
-    """Vérifie les identifiants via l'API REST de Firebase."""
     url = f"https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key={API_KEY}"
     payload = {"email": email, "password": password, "returnSecureToken": True}
     try:
@@ -71,7 +81,6 @@ def handle_login(email, password):
     if not email or not password:
         st.warning("Veuillez remplir tous les champs.")
         return False
-        
     auth_data = verify_password(email, password)
     if auth_data:
         st.session_state.user = {
@@ -86,10 +95,7 @@ def handle_login(email, password):
 
 def handle_signup(email, password):
     try:
-        # 1. Création du compte dans Firebase Auth (Admin SDK)
         user = admin_auth.create_user(email=email, password=password)
-        
-        # 2. Initialisation du profil par défaut via la logique métier
         default_profile = {
             "email": email,
             "betrail_index": 50.0,
@@ -99,9 +105,7 @@ def handle_signup(email, password):
             "race_plan": [],
             "created_at": time.time()
         }
-        # Utilise la fonction de logic.py pour garantir le bon chemin Firestore
         save_user_profile(user.uid, default_profile)
-        
         st.success("Compte créé avec succès !")
         return True
     except Exception as e:
@@ -112,20 +116,17 @@ def handle_signup(email, password):
 if "user" not in st.session_state:
     st.session_state.user = None
 
-# ÉCRAN DE CONNEXION / INSCRIPTION
 if st.session_state.user is None:
     c1, c2, c3 = st.columns([1, 2, 1])
     with c2:
         st.markdown("<h1 style='text-align: center;'>🏃‍♂️ Cockpit Performance</h1>", unsafe_allow_html=True)
         tab_l, tab_s = st.tabs(["Connexion", "Inscription"])
-        
         with tab_l:
             email = st.text_input("Email", key="login_email")
             pwd = st.text_input("Mot de passe", type="password", key="login_pwd")
             if st.button("Se connecter", use_container_width=True):
                 if handle_login(email, pwd): 
                     st.rerun()
-        
         with tab_s:
             new_email = st.text_input("Email", key="reg_email")
             new_pwd = st.text_input("Mot de passe", type="password", key="reg_pwd")
@@ -139,12 +140,12 @@ if st.session_state.user is None:
 
 # --- 7. CHARGEMENT DONNÉES & NAVIGATION ---
 user_id = st.session_state.user['uid']
-# On charge le profil depuis Firestore (via logic.py)
 user_profile = load_profile(user_id)
 
 @st.cache_data(ttl=600)
 def fetch_fitness(uid, api_key):
-    # Appel de la fonction dans logic.py
+    if not uid or not api_key:
+        return pd.DataFrame()
     return get_athlete_fitness(uid, api_key)
 
 # Sidebar
@@ -160,7 +161,7 @@ with st.sidebar:
         st.session_state.user = None
         st.rerun()
 
-# Données Fitness (Intervals.icu)
+# Données Fitness
 df_fitness = fetch_fitness(
     user_profile.get('intervals_id'), 
     user_profile.get('intervals_api')
