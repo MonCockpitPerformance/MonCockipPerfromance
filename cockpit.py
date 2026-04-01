@@ -1,29 +1,32 @@
 import streamlit as st
-st.write("1. Imports système OK")
+import os
+import sys
+import pandas as pd
+import time
+from datetime import date
+import requests
 
+# --- 1. DEBUG INITIAL (Pour voir où ça bloque) ---
+# Ces messages s'afficheront sur ton écran Streamlit
+st.write("1. Imports système (os, sys, requests) OK")
+
+# --- 2. CONFIGURATION DES CHEMINS ---
 try:
-    from core.data import init_firebase
-    st.write("2. Import data.py OK")
-    db = init_firebase()
-    st.write("3. Firebase Initialisé OK")
+    # On définit le chemin racine pour trouver les dossiers 'core' et 'tabs'
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    if current_dir not in sys.path:
+        sys.path.insert(0, current_dir)
+    st.write("2. Configuration des chemins système OK")
 except Exception as e:
-    st.error(f"ERREUR ICI : {e}")
+    st.error(f"Erreur de configuration des chemins : {e}")
 
-# --- 1. CONFIGURATION DES CHEMINS ---
-# On s'assure que Python trouve les modules dans le dossier 'core'
-current_dir = os.path.dirname(os.path.abspath(__file__))
-if current_dir not in sys.path:
-    sys.path.insert(0, current_dir)
-
-# --- 2. IMPORTS DES MODULES LOCAUX ---
+# --- 3. IMPORTS DES MODULES LOCAUX ---
 try:
-    # Import des fonctions de calcul (Cerveau)
+    # On importe les fonctions depuis core/logic.py et core/data.py
     from core.logic import get_training_status, calculate_race_prediction, get_ai_response
-    
-    # Import des fonctions de données (Magasinier)
     from core.data import init_firebase, load_profile, get_athlete_fitness, save_user_profile
     
-    # Imports des modules de tabs (Interface)
+    # Imports des onglets et plans
     import core.race_plan as race_plan
     import core.nutrition_plan as nutrition_plan
     import tabs.dashboard as dashboard
@@ -31,61 +34,54 @@ try:
     import tabs.profile_tab as profile_tab
     import tabs.objectives as objectives_tab
     
-except ImportError as e:
-    st.error(f"❌ Erreur d'importation des modules : {e}")
+    st.write("3. Importation des modules locaux (core & tabs) OK")
+except Exception as e:
+    st.error(f"❌ Erreur d'importation des fichiers : {e}")
+    st.info("Vérifiez que les fichiers existent dans /core/ et /tabs/")
     st.stop()
 
-# --- 3. CONFIGURATION DE LA PAGE ---
+# --- 4. CONFIGURATION DE LA PAGE ---
 st.set_page_config(
-    page_title="Performance Cockpit v2.0",
-    page_icon="🏃‍♂️",
-    layout="wide",
-    initial_sidebar_state="expanded"
+    page_title="Performance Cockpit", 
+    page_icon="🏃‍♂️", 
+    layout="wide"
 )
 
-# Style UI Custom pour un look sombre et pro
-st.markdown("""
-    <style>
-        .stButton>button { border-radius: 8px; font-weight: 600; height: 3em; }
-        [data-testid="stSidebar"] { background-color: #161b22; border-right: 1px solid #30363d; }
-        .metric-card { background: #1c2128; padding: 15px; border-radius: 10px; border: 1px solid #30363d; }
-    </style>
-""", unsafe_allow_html=True)
-
-# --- 4. INITIALISATION FIREBASE ---
+# --- 5. INITIALISATION FIREBASE ---
 try:
-    # On initialise la connexion (via data.py)
+    # On initialise la base de données via data.py
     db = init_firebase() 
-    # API KEY nécessaire pour l'authentification REST
+    # On récupère l'API Key pour la connexion login
     API_KEY = st.secrets["firebase_service_account"]["api_key"]
+    st.write("4. Initialisation Firebase & API Key OK")
 except Exception as e:
-    st.error(f"Erreur de configuration Firebase : {e}")
+    st.error(f"Erreur de connexion Firebase : {e}")
     st.stop()
 
-# --- 5. FONCTIONS D'AUTHENTIFICATION ---
+# --- 6. GESTION DE LA SESSION ---
+if "user" not in st.session_state:
+    st.session_state.user = None
+
 def verify_password(email, password):
-    """Vérifie les identifiants via l'API Google Firebase."""
+    """Vérifie les identifiants via l'API REST Firebase."""
     url = f"https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key={API_KEY}"
     payload = {"email": email, "password": password, "returnSecureToken": True}
     try:
         res = requests.post(url, json=payload, timeout=10)
         if res.status_code == 200:
             return res.json()
-    except:
+    except Exception:
         pass
     return None
 
-# --- 6. GESTION DE LA SESSION ---
-if "user" not in st.session_state:
-    st.session_state.user = None
-
-# ÉCRAN DE CONNEXION (Si non connecté)
+# --- ÉCRAN DE CONNEXION ---
 if st.session_state.user is None:
-    c1, c2, c3 = st.columns([1, 2, 1])
-    with c2:
-        st.markdown("<h1 style='text-align: center;'>🏃‍♂️ Cockpit Performance</h1>", unsafe_allow_html=True)
-        email = st.text_input("Email", key="login_email")
-        pwd = st.text_input("Mot de passe", type="password", key="login_pwd")
+    st.title("🏃‍♂️ Performance Cockpit - Connexion")
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        email = st.text_input("Votre Email")
+        pwd = st.text_input("Votre Mot de passe", type="password")
         
         if st.button("Se connecter", use_container_width=True):
             auth_data = verify_password(email, pwd)
@@ -94,44 +90,43 @@ if st.session_state.user is None:
                     "email": email, 
                     "uid": auth_data['localId']
                 }
+                st.success("Connexion réussie !")
+                time.sleep(1)
                 st.rerun()
             else:
-                st.error("Identifiants incorrects.")
+                st.error("Identifiants incorrects. Veuillez réessayer.")
     st.stop()
 
 # --- 7. CHARGEMENT DES DONNÉES UTILISATEUR ---
 user_id = st.session_state.user['uid']
+# On charge le profil depuis Firestore
 user_profile = load_profile(user_id)
 
-# Récupération des données Intervals.icu
-@st.cache_data(ttl=600)
-def fetch_fitness_data(uid, api_key):
-    return get_athlete_fitness(uid, api_key)
-
-df_fitness = fetch_fitness_data(
-    user_profile.get('intervals_id'), 
-    user_profile.get('intervals_api')
-)
-
-# --- 8. BARRE LATÉRALE (SIDEBAR) ---
+# Barre latérale de navigation
 with st.sidebar:
-    st.title("Menu")
-    st.write(f"Connecté : **{st.session_state.user['email']}**")
+    st.title("🏃‍♂️ Cockpit")
+    st.write(f"Utilisateur : {st.session_state.user['email']}")
+    st.divider()
     
     menu = st.radio(
-        "Navigation",
+        "Navigation", 
         ["📊 Dashboard", "📅 Entraînement", "🏁 Plan de Course", "🍼 Nutrition", "🏆 Objectifs", "👤 Profil"]
     )
     
     st.divider()
-    if st.button("🚪 Déconnexion", use_container_width=True):
+    if st.button("🚪 Déconnexion"):
         st.session_state.user = None
         st.rerun()
 
-# --- 9. RENDU DES ONGLETS ---
+# Récupération des données Intervals.icu
+df_fitness = get_athlete_fitness(
+    user_profile.get('intervals_id'), 
+    user_profile.get('intervals_api')
+)
+
+# --- 8. RENDU DES ONGLETS (TABS) ---
 try:
     if menu == "📊 Dashboard":
-        # On passe les données au dashboard pour affichage
         dashboard.render(df_fitness, user_profile)
         
     elif menu == "📅 Entraînement":
@@ -150,9 +145,5 @@ try:
         profile_tab.render(user_id, user_profile)
 
 except Exception as e:
-    st.error(f"Erreur d'affichage dans l'onglet {menu}")
+    st.error(f"Une erreur est survenue dans l'affichage de l'onglet {menu}")
     st.exception(e)
-
-# Footer
-st.sidebar.markdown("---")
-st.sidebar.caption(f"v2.0.2 | {date.today().year} Performance Lab")
