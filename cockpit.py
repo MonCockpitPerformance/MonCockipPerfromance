@@ -6,184 +6,58 @@ import os
 import sys
 import requests
 
-# --- 1. CONFIGURATION DES CHEMINS ---
-current_dir = os.path.dirname(os.path.abspath(__file__))
-if current_dir not in sys.path:
-    sys.path.insert(0, current_dir)
+# Configuration chemins
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-# --- 2. IMPORTS DES MODULES LOCAUX ---
-try:
-    # Les fonctions de calcul pur (logique métier)
-    from core.logic import calculate_fitness_forecast, predict_race_performance
-    
-    # Les fonctions de données et Firebase (C'est ici qu'était l'erreur)
-    from core.data import (
-        init_firebase, 
-        load_profile, 
-        get_athlete_fitness, 
-        save_user_profile
-    )
-    
-    import core.race_plan as race_plan
-    import core.nutrition_plan as nutrition_plan
-    import tabs.dashboard as dashboard
-    import tabs.training as training
-    import tabs.profile_tab as profile_tab
-    import tabs.objectives as objectives_tab
-    from firebase_admin import auth as admin_auth
-    
-except ImportError as e:
-    st.error(f"❌ Erreur d'importation des modules : {e}")
-    st.info("Note : Vérifiez que get_athlete_fitness est bien dans core/data.py et non core/logic.py")
-    st.stop()
+# Imports corrigés
+from core.logic import get_training_status, calculate_race_prediction, get_ai_response
+from core.data import init_firebase, load_profile, get_athlete_fitness, save_user_profile
 
-# --- 3. CONFIGURATION DE LA PAGE ---
-st.set_page_config(
-    page_title="Performance Cockpit v2.0",
-    page_icon="🏃‍♂️",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+# Configuration Page
+st.set_page_config(page_title="Performance Cockpit", page_icon="🏃‍♂️", layout="wide")
 
-# Style UI Custom
-st.markdown("""
-    <style>
-        .stButton>button { border-radius: 8px; font-weight: 600; height: 3em; }
-        [data-testid="stSidebar"] { background-color: #161b22; border-right: 1px solid #30363d; }
-        .stTabs [data-baseweb="tab-list"] { gap: 8px; }
-        .stTabs [aria-selected="true"] { border-bottom: 2px solid #FF4B4B !important; }
-        .metric-card { background: #1c2128; padding: 15px; border-radius: 10px; border: 1px solid #30363d; }
-    </style>
-""", unsafe_allow_html=True)
+# Initialisation Firebase & Auth
+db, fb_auth = init_firebase()
+API_KEY = st.secrets["firebase_service_account"]["api_key"]
 
-# --- 4. INITIALISATION FIREBASE ---
-try:
-    db, firebase_config = init_firebase() 
-    # Récupération sécurisée de l'API KEY pour l'auth REST
-    API_KEY = st.secrets["firebase_service_account"]["api_key"]
-except Exception as e:
-    st.error(f"Erreur de configuration Firebase : {e}")
-    st.stop()
-
-# --- 5. FONCTIONS D'AUTHENTIFICATION ---
 def verify_password(email, password):
     url = f"https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key={API_KEY}"
-    payload = {"email": email, "password": password, "returnSecureToken": True}
-    try:
-        res = requests.post(url, json=payload)
-        if res.status_code == 200:
-            return res.json()
-    except Exception:
-        pass
-    return None
+    res = requests.post(url, json={"email": email, "password": password, "returnSecureToken": True})
+    return res.json() if res.status_code == 200 else None
 
-def handle_login(email, password):
-    if not email or not password:
-        st.warning("Veuillez remplir tous les champs.")
-        return False
-    auth_data = verify_password(email, password)
-    if auth_data:
-        st.session_state.user = {
-            "email": email, 
-            "uid": auth_data['localId'],
-            "token": auth_data['idToken']
-        }
-        return True
-    else:
-        st.error("Email ou mot de passe incorrect.")
-        return False
+if "user" not in st.session_state: st.session_state.user = None
 
-def handle_signup(email, password):
-    try:
-        user = admin_auth.create_user(email=email, password=password)
-        default_profile = {
-            "email": email,
-            "betrail_index": 50.0,
-            "intervals_id": "",
-            "intervals_api": "",
-            "weight": 70,
-            "race_plan": [],
-            "created_at": time.time()
-        }
-        save_user_profile(user.uid, default_profile)
-        st.success("Compte créé avec succès !")
-        return True
-    except Exception as e:
-        st.error(f"Erreur d'inscription : {str(e)}")
-        return False
-
-# --- 6. GESTION DE LA SESSION ---
-if "user" not in st.session_state:
-    st.session_state.user = None
-
+# Écran de Connexion
 if st.session_state.user is None:
-    c1, c2, c3 = st.columns([1, 2, 1])
-    with c2:
-        st.markdown("<h1 style='text-align: center;'>🏃‍♂️ Cockpit Performance</h1>", unsafe_allow_html=True)
-        tab_l, tab_s = st.tabs(["Connexion", "Inscription"])
-        with tab_l:
-            email = st.text_input("Email", key="login_email")
-            pwd = st.text_input("Mot de passe", type="password", key="login_pwd")
-            if st.button("Se connecter", use_container_width=True):
-                if handle_login(email, pwd): 
-                    st.rerun()
-        with tab_s:
-            new_email = st.text_input("Email", key="reg_email")
-            new_pwd = st.text_input("Mot de passe", type="password", key="reg_pwd")
-            if st.button("Créer un compte", use_container_width=True):
-                if len(new_pwd) >= 6: 
-                    if handle_signup(new_email, new_pwd):
-                        time.sleep(1)
-                else: 
-                    st.warning("Le mot de passe doit faire 6 caractères minimum.")
+    st.title("🏃‍♂️ Cockpit Performance")
+    email = st.text_input("Email")
+    pwd = st.text_input("Mot de passe", type="password")
+    if st.button("Se connecter"):
+        data = verify_password(email, pwd)
+        if data:
+            st.session_state.user = {"email": email, "uid": data['localId']}
+            st.rerun()
     st.stop()
 
-# --- 7. CHARGEMENT DONNÉES & NAVIGATION ---
+# Chargement données
 user_id = st.session_state.user['uid']
 user_profile = load_profile(user_id)
+df_fitness = get_athlete_fitness(user_profile.get('intervals_id'), user_profile.get('intervals_api'))
 
-@st.cache_data(ttl=600)
-def fetch_fitness(uid, api_key):
-    if not uid or not api_key:
-        return pd.DataFrame()
-    return get_athlete_fitness(uid, api_key)
+# Interface principale
+st.sidebar.title("Menu")
+menu = st.sidebar.radio("Navigation", ["📊 Dashboard", "👤 Profil"])
 
-# Sidebar
-with st.sidebar:
-    st.title("Menu")
-    st.write(f"Utilisateur : **{st.session_state.user['email']}**")
-    menu = st.radio(
-        "Navigation",
-        ["📊 Dashboard", "📅 Entraînement", "🏁 Plan de Course", "🍼 Nutrition", "🏆 Objectifs", "👤 Profil"]
-    )
-    st.divider()
-    if st.button("🚪 Déconnexion", use_container_width=True):
-        st.session_state.user = None
-        st.rerun()
+if menu == "📊 Dashboard":
+    st.header("Tableau de bord")
+    status = get_training_status(df_fitness)
+    st.metric("Condition (CTL)", status['ctl'])
+    st.write(f"Statut : {status['status']}")
 
-# Données Fitness
-df_fitness = fetch_fitness(
-    user_profile.get('intervals_id'), 
-    user_profile.get('intervals_api')
-)
-
-# --- 8. RENDU DES ONGLETS ---
-try:
-    if menu == "📊 Dashboard":
-        dashboard.render(df_fitness, user_profile)
-    elif menu == "📅 Entraînement":
-        training.render(df_fitness)
-    elif menu == "🏁 Plan de Course":
-        race_plan.render(user_id, user_profile)
-    elif menu == "🍼 Nutrition":
-        nutrition_plan.render(user_profile)
-    elif menu == "🏆 Objectifs":
-        objectives_tab.render(user_id)
-    elif menu == "👤 Profil":
-        profile_tab.render(user_id, user_profile)
-except Exception as e:
-    st.error(f"Erreur d'affichage dans l'onglet {menu}")
-    st.exception(e)
-
-st.sidebar.markdown("---")
-st.sidebar.caption(f"v2.0.2 | {date.today().year} Performance Lab")
+elif menu == "👤 Profil":
+    st.header("Mon Profil")
+    new_idx = st.number_input("Index Betrail", value=user_profile.get('betrail_index', 50.0))
+    if st.button("Sauvegarder"):
+        user_profile['betrail_index'] = new_idx
+        save_user_profile(user_id, user_profile)
+        st.success("Profil mis à jour !")
