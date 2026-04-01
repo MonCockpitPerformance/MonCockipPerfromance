@@ -1,10 +1,13 @@
 import streamlit as st
-import pandas as pd
-import time
-from datetime import date
-import os
-import sys
-import requests
+st.write("1. Imports système OK")
+
+try:
+    from core.data import init_firebase
+    st.write("2. Import data.py OK")
+    db = init_firebase()
+    st.write("3. Firebase Initialisé OK")
+except Exception as e:
+    st.error(f"ERREUR ICI : {e}")
 
 # --- 1. CONFIGURATION DES CHEMINS ---
 # On s'assure que Python trouve les modules dans le dossier 'core'
