@@ -1,7 +1,7 @@
 import streamlit as st
 from datetime import date, timedelta, datetime
 import pandas as pd
-from core.data import load_profile, get_nolio_sessions, parse_betrail_paste
+from core.data import load_profile, parse_betrail_paste
 from core.logic import get_ai_response
 
 # --- 0. CONFIGURATION DES ÉMOJIS ---
