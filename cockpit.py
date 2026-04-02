@@ -11,8 +11,9 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 if current_dir not in sys.path:
     sys.path.insert(0, current_dir)
 
-# Importations des modules internes (Structure par dossiers)
+# Importations des modules internes
 try:
+    # On importe uniquement ce qui existe réellement dans core/data.py
     from core.data import init_firebase, load_profile, get_athlete_fitness, save_user_profile
     import core.race_plan as race_plan
     import core.nutrition_plan as nutrition_plan
@@ -33,7 +34,6 @@ st.set_page_config(
 )
 
 # --- 2. INITIALISATION FIREBASE ---
-# init_firebase() gère maintenant la connexion via les st.secrets
 db, _ = init_firebase()
 
 # --- 3. GESTION DE LA SESSION UTILISATEUR ---
@@ -43,10 +43,7 @@ if "user" not in st.session_state:
 # --- 4. FONCTIONS D'AUTHENTIFICATION ---
 def handle_login(email, password):
     try:
-        # Note: Firebase Admin est utilisé ici pour identifier l'utilisateur.
-        # Pour une sécurité maximale en production, on passerait par l'API REST Firebase Auth.
         user = admin_auth.get_user_by_email(email)
-        # On stocke l'email et l'UID dans la session
         st.session_state.user = {"email": email, "uid": user.uid}
         return True
     except Exception as e:
@@ -56,7 +53,6 @@ def handle_login(email, password):
 def handle_signup(email, password):
     try:
         user = admin_auth.create_user(email=email, password=password)
-        # Initialiser le profil par défaut dans Firestore
         save_user_profile(user.uid, {
             "email": email,
             "created_at": time.time(),
@@ -71,14 +67,13 @@ def handle_signup(email, password):
 
 def handle_reset_password(email):
     try:
-        # Génère un lien de réinitialisation (utile pour l'admin ou envoi manuel)
         link = admin_auth.generate_password_reset_link(email)
         st.info(f"Procédure de réinitialisation activée pour {email}.")
-        st.warning("Veuillez contacter l'administrateur pour recevoir votre lien sécurisé.")
+        st.warning("Veuillez contacter l'administrateur pour recevoir votre lien.")
     except Exception as e:
         st.error(f"Utilisateur introuvable : {str(e)}")
 
-# --- 5. ÉCRAN D'AUTHENTIFICATION (Si non connecté) ---
+# --- 5. ÉCRAN D'AUTHENTIFICATION ---
 if st.session_state.user is None:
     st.title("🔐 Connexion au Cockpit")
     
@@ -91,8 +86,6 @@ if st.session_state.user is None:
             if email and password:
                 if handle_login(email, password):
                     st.rerun()
-            else:
-                st.warning("Veuillez remplir tous les champs.")
     
     with tab_signup:
         new_email = st.text_input("Nouvel Email", key="reg_email")
@@ -100,11 +93,8 @@ if st.session_state.user is None:
         if st.button("Créer mon espace athlète", use_container_width=True):
             if new_email and len(new_password) >= 6:
                 handle_signup(new_email, new_password)
-            else:
-                st.warning("Données invalides (mot de passe trop court ?).")
                 
     with tab_reset:
-        st.subheader("Réinitialiser mon accès")
         reset_email = st.text_input("Email du compte", key="reset_email")
         if st.button("Lancer la récupération", use_container_width=True):
             if reset_email:
@@ -112,13 +102,13 @@ if st.session_state.user is None:
 
     st.stop()
 
-# --- 6. CHARGEMENT DES DONNÉES (Si connecté) ---
+# --- 6. CHARGEMENT DES DONNÉES ---
 user_id = st.session_state.user['uid']
 user_profile = load_profile(user_id)
 
 # Synchronisation automatique Intervals.icu
 with st.spinner("Synchronisation des données de forme..."):
-    # On utilise 'intervals_api' pour correspondre à tes fichiers core/data.py
+    # On récupère les données de fitness (le dataframe df)
     df = get_athlete_fitness(
         user_profile.get('intervals_id'), 
         user_profile.get('intervals_api') or user_profile.get('api_key')
@@ -142,23 +132,22 @@ try:
     if menu == "📊 Dashboard":
         dashboard.render(df)
     elif menu == "📅 Entraînement":
-        # On passe le dataframe de fitness pour analyse dans l'onglet entraînement
+        # On passe le dataframe df. Si tu as besoin de sessions spécifiques, 
+        # elles devraient être gérées à l'intérieur du module training via core.logic
         training.render(df, [])
     elif menu == "🏁 Plan de Course":
         race_plan.render()
     elif menu == "🍼 Nutrition":
         nutrition_plan.render()
     elif menu == "🏆 Objectifs":
-        # Si tes onglets originaux ont besoin du user_id, on peut l'ajouter ici
-        # Par sécurité, on essaie de l'appeler sans paramètre comme dans ton fichier d'origine
         try:
-            objectives_tab.render()
-        except TypeError:
             objectives_tab.render(user_id)
+        except TypeError:
+            objectives_tab.render()
     elif menu == "👤 Profil":
         try:
-            profile_tab.render()
-        except TypeError:
             profile_tab.render(user_id)
+        except TypeError:
+            profile_tab.render()
 except Exception as e:
     st.error(f"Une erreur est survenue lors du rendu de l'onglet {menu} : {e}")
