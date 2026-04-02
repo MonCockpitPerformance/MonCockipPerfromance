@@ -1,53 +1,48 @@
-import pandas as pd
-import numpy as np
-import requests
-import time
+import streamlit as st
+import google.generativeai as genai
 
-def get_training_status(fitness_df):
-    """Analyse l'état de forme actuel."""
-    if fitness_df is None or (hasattr(fitness_df, 'empty') and fitness_df.empty):
-        return {"ctl": 0, "tsb": 0, "status": "Données non disponibles"}
+def get_ai_response(prompt, profile, metrics, recent_activities, planned_sessions, betrail_history):
+    """
+    Envoie le contexte complet de l'athlète à Gemini et récupère son analyse.
+    """
+    # 1. Configuration de l'API (Clé stockée dans st.secrets)
     try:
-        last_row = fitness_df.iloc[-1]
-        ctl = float(last_row.get('icu_ctl', 0))
-        tsb = float(last_row.get('icu_tsb', 0))
-        if tsb < -25: status = "🚨 Risque de Fatigue"
-        elif tsb < -10: status = "🔥 Entraînement Intensif"
-        elif tsb < 5: status = "📈 Phase Productive"
-        elif tsb < 15: status = "✨ Affûtage / Frais"
-        else: status = "💤 Désentraînement"
-        return {"ctl": round(ctl, 1), "tsb": round(tsb, 1), "status": status}
-    except:
-        return {"ctl": 0, "tsb": 0, "status": "Erreur de calcul"}
+        # Utilisation de .get() pour éviter un crash si la clé est absente temporairement
+        api_key = st.secrets.get("GOOGLE_API_KEY")
+        if not api_key:
+            return "⚠️ Erreur : Clé GOOGLE_API_KEY introuvable dans les secrets Streamlit."
+            
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel('gemini-pro')
+    except Exception as e:
+        return f"⚠️ Erreur de configuration de l'IA : {e}"
 
-def calculate_race_prediction(km, d_plus, betrail_index):
-    """Prédit le temps de course."""
-    idx = float(betrail_index or 50.0)
-    effort_km = float(km) + (float(d_plus) / 100.0)
-    ref_speed = (idx / 50.0) * 7.5
-    time_h = effort_km / ref_speed if ref_speed > 0 else 0
-    return {
-        "hours": time_h, 
-        "effort_km": round(effort_km, 1), 
-        "speed_kmh": round(float(km)/time_h, 2) if time_h > 0 else 0
-    }
+    # 2. Construction du "Cerveau" (Le Prompt Système)
+    system_context = f"""
+    Tu es un coach expert en Trail et Ultra-trail. 
+    Ton athlète a un indice BeTrail de {profile.get('betrail_index', 'inconnu')}.
+    Son objectif est : {profile.get('next_race_name', 'non défini')}.
+    
+    Données actuelles :
+    - Forme (CTL) : {metrics.get('ctl', 0)}
+    - Fatigue (ATL) : {metrics.get('atl', 0)}
+    - État (TSB) : {metrics.get('tsb', 0)} (Positif = frais, Négatif = fatigué)
+    
+    Historique récent : {recent_activities[-3:] if recent_activities else 'Aucune donnée'}
+    Séances prévues : {planned_sessions[:3] if planned_sessions else 'Rien de prévu'}
+    
+    Réponds de manière concise, technique mais motivante. Utilise des emojis sportifs.
+    """
 
-def get_ai_response(user_query, athlete_context, system_prompt=None):
-    """Appelle l'API Gemini (L'environnement injecte la clé)."""
-    api_key = "" 
-    model_name = "gemini-2.5-flash-preview-09-2025"
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
-    if not system_prompt:
-        system_prompt = "Tu es un coach expert en Trail Running."
-    payload = {
-        "contents": [{"parts": [{"text": f"Contexte: {athlete_context}\nQuestion: {user_query}"}]}],
-        "systemInstruction": {"parts": [{"text": system_prompt}]}
-    }
-    for delay in [1, 2, 4]:
-        try:
-            response = requests.post(url, json=payload, timeout=30)
-            if response.status_code == 200:
-                return response.json()['candidates'][0]['content']['parts'][0]['text']
-            elif response.status_code == 429: time.sleep(delay)
-        except: time.sleep(delay)
-    return "L'IA est indisponible."
+    # 3. Appel à Gemini
+    try:
+        full_prompt = f"{system_context}\n\nL'athlète demande : {prompt}"
+        response = model.generate_content(full_prompt)
+        return response.text
+    except Exception as e:
+        return f"❌ Désolé, le coach IA est indisponible : {e}"
+
+def get_ai_plan(profile, goal_date):
+    """Fonction optionnelle pour générer un bloc d'entraînement complet."""
+    # (Tu pourras l'étoffer plus tard)
+    return "Planification en cours de développement..."
