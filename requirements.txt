@@ -1,6 +1,6 @@
 streamlit
 pandas
-plotly
-openpyxl
 numpy
+requests
 firebase-admin
+google-generativeai
