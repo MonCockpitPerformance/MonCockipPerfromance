@@ -7,14 +7,13 @@ from firebase_admin import credentials, firestore, auth
 import re
 import xml.etree.ElementTree as ET
 import numpy as np
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # --- INITIALISATION FIREBASE ---
 def init_firebase():
     """Initialise Firebase avec les secrets Streamlit Cloud."""
     if not firebase_admin._apps:
         try:
-            # On cherche la section [firebase] dans tes secrets
             fb_conf = st.secrets["firebase"]
             raw_key = fb_conf.get("private_key", "").strip()
             if raw_key.startswith('"') and raw_key.endswith('"'):
@@ -50,8 +49,16 @@ def load_profile(user_id):
         doc = doc_ref.get()
         if doc.exists:
             profile = doc.to_dict()
-            if "race_plan" not in profile: profile["race_plan"] = []
-            if "checkpoints" not in profile: profile["checkpoints"] = []
+            # Valeurs par défaut pour éviter les erreurs de clé
+            defaults = {
+                "intervals_id": "", 
+                "api_key": "", 
+                "betrail_index": 50.0, 
+                "race_plan": [], 
+                "checkpoints": []
+            }
+            for k, v in defaults.items():
+                if k not in profile: profile[k] = v
             return profile
     except:
         pass
@@ -63,31 +70,51 @@ def save_user_profile(user_id, data):
     if db and user_id:
         db.collection("profiles").document(user_id).set(data, merge=True)
 
+# Alias pour compatibilité
 save_profile = save_user_profile
 
 # --- RÉCUPÉRATION INTERVALS.ICU ---
 @st.cache_data(ttl=600)
 def get_athlete_fitness(intervals_id, api_key):
+    """Récupère les données de fitness depuis Intervals.icu."""
     if not intervals_id or not api_key:
         return pd.DataFrame()
-    url = f"https://intervals.icu/api/v1/athlete/{intervals_id}/activities?oldest=2026-01-01"
-    auth_str = base64.b64encode(f"API_KEY:{api_key}".encode()).decode()
+    
+    # Correction : date dynamique (ex: 90 jours en arrière)
+    oldest_date = (datetime.now() - timedelta(days=90)).strftime('%Y-%m-%d')
+    url = f"https://intervals.icu/api/v1/athlete/{intervals_id}/activities?oldest={oldest_date}"
+    
+    # Correction cruciale : l'utilisateur doit être 'api_key' en minuscules
+    auth_str = base64.b64encode(f"api_key:{api_key}".encode()).decode()
     headers = {"Authorization": f"Basic {auth_str}"}
+    
     try:
         res = requests.get(url, headers=headers, timeout=10)
         if res.status_code == 200:
-            df = pd.DataFrame(res.json())
-            if not df.empty and 'start_date_local' in df.columns:
+            data = res.json()
+            if not data:
+                return pd.DataFrame()
+                
+            df = pd.DataFrame(data)
+            if 'start_date_local' in df.columns:
                 df['date'] = pd.to_datetime(df['start_date_local'])
-                for col in ['icu_ctl', 'icu_atl', 'icu_tsb']:
+                
+                # Conversion numérique des colonnes clés
+                cols_to_fix = ['icu_ctl', 'icu_atl', 'icu_tsb', 'icu_fitness', 'icu_fatigue']
+                for col in cols_to_fix:
                     if col in df.columns:
-                        df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+                        df[col] = pd.to_numeric(df[col], errors='coerce').fillna(method='ffill').fillna(0)
+                
                 return df.sort_values('date')
-    except:
-        pass
+        else:
+            # Utile pour le debug : affiche l'erreur si l'API rejette la demande
+            st.warning(f"Intervals.icu a répondu : {res.status_code}. Vérifiez vos identifiants.")
+    except Exception as e:
+        st.error(f"Erreur de connexion API : {e}")
+    
     return pd.DataFrame()
 
-# --- TA LOGIQUE GPX D'ORIGINE ---
+# --- LOGIQUE GPX ---
 def haversine(lat1, lon1, lat2, lon2):
     R = 6371.0
     phi1, phi2 = np.radians(lat1), np.radians(lat2)
@@ -112,13 +139,12 @@ def parse_gpx_file(file):
                 if diff > 0: total_gain += diff
             data.append({"distance": round(total_dist, 3), "elevation": round(ele, 1)})
             last_lat, last_lon, last_ele = lat, lon, ele
-        st.success("✅ GPX analysé avec succès !")
         return pd.DataFrame(data)
     except Exception as e:
         st.error(f"Erreur GPX : {e}")
         return pd.DataFrame()
 
-# --- TA LOGIQUE BETRAIL D'ORIGINE ---
+# --- LOGIQUE BETRAIL ---
 def parse_betrail_paste(raw_text):
     if not raw_text: return []
     races = []
