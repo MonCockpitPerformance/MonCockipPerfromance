@@ -10,7 +10,7 @@ root_dir = os.path.dirname(current_dir)
 if root_dir not in sys.path:
     sys.path.insert(0, root_dir)
 
-from core.data import load_profile, get_nolio_sessions, parse_betrail_paste
+from core.data import load_profile, parse_betrail_paste
 from core.logic import get_ai_response
 
 # --- CONFIGURATION DES ÉMOJIS ---
