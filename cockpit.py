@@ -12,15 +12,11 @@ if current_dir not in sys.path:
 
 # Importations des modules internes
 try:
-    # On importe uniquement les fonctions existantes dans ton core/data.py
     from core.data import init_firebase, load_profile, get_athlete_fitness, save_user_profile
-    
-    # On importe les autres modules de logique
     import core.race_plan as race_plan
     import core.nutrition_plan as nutrition_plan
     
-    # On importe les vues (onglets)
-    # Note : Vérifie que ces fichiers existent bien dans ton dossier /tabs
+    # Importation des vues
     import tabs.dashboard as dashboard
     import tabs.training as training
     import tabs.profile_tab as profile_tab
@@ -28,7 +24,6 @@ try:
     
 except ImportError as e:
     st.error(f"Erreur d'importation des modules : {e}")
-    st.info("Astuce : Vérifiez que 'get_nolio_sessions' n'est plus appelé dans vos fichiers de l'onglet 'tabs/'.")
     st.stop()
 
 # --- 1. CONFIGURATION DE LA PAGE ---
@@ -40,7 +35,6 @@ st.set_page_config(
 )
 
 # --- 2. INITIALISATION FIREBASE ---
-# On essaie d'initialiser, sinon on affiche une erreur propre
 try:
     db, auth = init_firebase()
 except Exception as e:
@@ -51,11 +45,10 @@ except Exception as e:
 if "user" not in st.session_state:
     st.session_state.user = None
 
-# --- 4. LOGIQUE D'AUTH SIMPLIFIÉE ---
-# (À adapter selon ton système Firebase Auth réel)
+# --- 4. LOGIQUE D'AUTH ---
 def handle_login(email, password):
-    # Simulation ou appel Firebase Admin si configuré
-    st.session_state.user = {"email": email, "uid": "user_id_placeholder"}
+    # Simulation (À remplacer par auth.verify_password ou autre selon votre setup)
+    st.session_state.user = {"email": email, "uid": "user_id_test"} # Exemple ID stable pour tests
     return True
 
 # --- 5. ÉCRAN D'AUTHENTIFICATION ---
@@ -72,28 +65,43 @@ if st.session_state.user is None:
 user_id = st.session_state.user['uid']
 user_profile = load_profile(user_id)
 
-# Récupération des données Intervals.icu
-with st.spinner("Synchronisation des données Intervals.icu..."):
-    df = get_athlete_fitness(
-        user_profile.get('intervals_id'), 
-        user_profile.get('intervals_api') or user_profile.get('api_key')
-    )
+# Récupération sécurisée des identifiants API
+# On vérifie les deux noms de clés possibles dans Firestore
+i_id = user_profile.get('intervals_id', '').strip()
+i_key = (user_profile.get('api_key') or user_profile.get('intervals_api', '')).strip()
+
+df_fitness = pd.DataFrame()
+
+if i_id and i_key:
+    with st.spinner("Synchronisation avec Intervals.icu..."):
+        df_fitness = get_athlete_fitness(i_id, i_key)
+else:
+    st.warning("⚠️ Identifiants Intervals.icu manquants dans le Profil.")
 
 # --- 7. BARRE LATÉRALE ---
 with st.sidebar:
     st.write(f"Connecté : **{st.session_state.user['email']}**")
     menu = st.radio("Navigation", ["📊 Dashboard", "📅 Entraînement", "🏁 Plan de Course", "👤 Profil"])
+    
+    st.divider()
     if st.button("🚪 Déconnexion"):
         st.session_state.user = None
         st.rerun()
 
 # --- 8. RENDU DES ONGLETS ---
 if menu == "📊 Dashboard":
-    dashboard.render(df)
+    if not df_fitness.empty:
+        dashboard.render(df_fitness)
+    else:
+        st.info("Aucune donnée de fitness à afficher. Vérifiez votre clé API dans l'onglet Profil.")
+
 elif menu == "📅 Entraînement":
-    # On passe le DataFrame et une liste vide pour les sessions si Nolio est désactivé
-    training.render(df, []) 
+    # On passe le DataFrame de fitness (contient CTL/ATL)
+    training.render(df_fitness, []) 
+
 elif menu == "🏁 Plan de Course":
     race_plan.render()
+
 elif menu == "👤 Profil":
+    # On passe l'ID pour permettre la sauvegarde dans profile_tab
     profile_tab.render(user_id)
